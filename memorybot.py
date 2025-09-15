@@ -1,187 +1,290 @@
-import os, json, requests, time
+import os
+import json
+import time
+import requests
 from datetime import datetime
 from flask import Flask, request, render_template_string, redirect, url_for, session, flash
 from dotenv import load_dotenv
-load_dotenv()
 
-# ---------- Config & helpers ----------
+load_dotenv()
 currdate = datetime.now().strftime("%Y-%m-%d")
 
-AIRTABLE_TOKEN   = os.getenv("AIRTABLE_TOKEN")
-AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
-AIRTABLE_TABLE_ID= os.getenv("AIRTABLE_TABLE_ID")
+# --- Config from environment ---
+AIRTABLE_TOKEN    = os.environ.get("AIRTABLE_TOKEN")
+AIRTABLE_BASE_ID  = os.environ.get("AIRTABLE_BASE_ID")
+AIRTABLE_TABLE_ID = os.environ.get("AIRTABLE_TABLE_ID")
 
-OPENROUTER_KEYS  = [os.getenv(k) for k in os.environ if k.startswith("OPENROUTER_API_KEY_") and os.getenv(k)]
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL","openai/gpt-oss-20b:free")
+# OpenRouter keys
+OPENROUTER_KEYS  = [os.environ[k] for k in os.environ if k.startswith("OPENROUTER_API_KEY_")]
+OPENROUTER_KEYS  = [k for k in OPENROUTER_KEYS if k]
+OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openai/gpt-oss-20b:free")
 
-GEMINI_KEYS      = [os.getenv(k) for k in os.environ if k.startswith("GEMINI_API_KEY_") and os.getenv(k)]
-GEMINI_MODEL     = os.getenv("GEMINI_MODEL","gemini-2.0-flash")
+# Gemini keys
+GEMINI_KEYS  = [os.environ[k] for k in os.environ if k.startswith("GEMINI_API_KEY_")]
+GEMINI_KEYS  = [k for k in GEMINI_KEYS if k]
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 
-UI_PASSWORD      = os.getenv("UI_PASSWORD")
-FLASK_SECRET     = os.getenv("FLASK_SECRET")
+UI_PASSWORD  = os.environ.get("UI_PASSWORD")
+FLASK_SECRET = os.environ.get("FLASK_SECRET")
 
-if not (AIRTABLE_TOKEN and AIRTABLE_BASE_ID and AIRTABLE_TABLE_ID):
-    raise RuntimeError("Missing Airtable env vars.")
-if not (OPENROUTER_KEYS or GEMINI_KEYS):
-    raise RuntimeError("Need at least one LLM API key.")
+if not AIRTABLE_TOKEN or not AIRTABLE_BASE_ID or not AIRTABLE_TABLE_ID:
+    raise RuntimeError("Set AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_ID in env")
+if not OPENROUTER_KEYS and not GEMINI_KEYS:
+    raise RuntimeError("Provide at least one OPENROUTER_API_KEY_x or GEMINI_API_KEY_x")
 
 app = Flask(__name__)
 app.secret_key = FLASK_SECRET
 
-session_req = requests.Session()
-or_index = gm_index = 0
+# global indexes
+openrouter_index = 0
+gemini_index     = 0
+session_req      = requests.Session()
 
-def _next_or_key():
-    global or_index
-    key = OPENROUTER_KEYS[or_index % len(OPENROUTER_KEYS)]
-    or_index += 1
+def get_next_openrouter_key():
+    global openrouter_index
+    key = OPENROUTER_KEYS[openrouter_index % len(OPENROUTER_KEYS)]
+    openrouter_index += 1
     return key
 
-def _next_gm_key():
-    global gm_index
-    key = GEMINI_KEYS[gm_index % len(GEMINI_KEYS)]
-    gm_index += 1
+def get_next_gemini_key():
+    global gemini_index
+    key = GEMINI_KEYS[gemini_index % len(GEMINI_KEYS)]
+    gemini_index += 1
     return key
 
-# ---------- LLM wrappers ----------
-def _call_openrouter(msgs, timeout=20):
+def call_openrouter_llm(messages, timeout=20):
     url = "https://openrouter.ai/api/v1/chat/completions"
+    last_err = None
     for _ in range(len(OPENROUTER_KEYS)):
-        hdrs = {"Authorization":f"Bearer {_next_or_key()}","Content-Type":"application/json"}
-        payload = {"model":OPENROUTER_MODEL,"messages":msgs,"temperature":0.4}
-        r = session_req.post(url,headers=hdrs,json=payload,timeout=timeout)
-        if r.status_code==200 and r.json().get("choices"):
-            return r.json()["choices"][0]["message"]["content"].strip()
-    raise RuntimeError("All OpenRouter keys failed.")
+        api_key = get_next_openrouter_key()
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        payload = {"model": OPENROUTER_MODEL, "messages": messages, "temperature": 0.4}
+        try:
+            resp = session_req.post(url, headers=headers, json=payload, timeout=timeout)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("choices"):
+                    msg = data["choices"][0].get("message", {}).get("content") or data["choices"][0].get("text", "")
+                    if msg:
+                        return msg.strip()
+                last_err = RuntimeError("Response missing message content.")
+            else:
+                last_err = RuntimeError(f"Status {resp.status_code}: {resp.text}")
+        except Exception as e:
+            last_err = e
+    raise RuntimeError(f"All OpenRouter keys failed. Last error: {last_err}")
 
-def _call_gemini(msgs, timeout=20):
-    text = "\n".join(m["content"] for m in msgs if m.get("content"))
-    payload = {"contents":[{"parts":[{"text":text}]}]}
-    url_tpl = "https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={k}"
+def call_gemini_llm(messages, timeout=20):
+    url_template = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    last_err   = None
+    text_input = "\n".join([m["content"] for m in messages if m.get("content")])
+    payload    = {"contents": [{"parts": [{"text": text_input}]}]}
     for _ in range(len(GEMINI_KEYS)):
-        r = session_req.post(url_tpl.format(m=GEMINI_MODEL,k=_next_gm_key()),
-                             json=payload,timeout=timeout)
-        if r.status_code==200:
-            return r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-    raise RuntimeError("All Gemini keys failed.")
+        api_key = get_next_gemini_key()
+        url     = url_template.format(model=GEMINI_MODEL, api_key=api_key)
+        try:
+            resp = session_req.post(url, json=payload, timeout=timeout)
+            if resp.status_code == 200:
+                data = resp.json()
+                try:
+                    msg = data["candidates"][0]["content"]["parts"][0]["text"]
+                    if msg:
+                        return msg.strip()
+                except Exception as e:
+                    last_err = e
+            else:
+                last_err = RuntimeError(f"Gemini status {resp.status_code}: {resp.text}")
+        except Exception as e:
+            last_err = e
+    raise RuntimeError(f"All Gemini keys failed. Last error: {last_err}")
 
-def call_llm(msgs):
+def call_llm(messages):
     try:
-        if GEMINI_KEYS:  return _call_gemini(msgs)
-        raise RuntimeError
+        if GEMINI_KEYS:
+            return call_gemini_llm(messages)
+        raise RuntimeError("No Gemini keys configured.")
     except Exception:
-        if OPENROUTER_KEYS: return _call_openrouter(msgs)
+        if OPENROUTER_KEYS:
+            return call_openrouter_llm(messages)
         raise
 
-# --- ONE-SHOT helper ---------------------------------------------------------
-def llm_one_shot(user_input:str)->dict:
-    sys_prompt =  f"""
-Return ONE JSON object exactly like the example below (no markdown fences):
-
-{{
-  "user_intent": "INSERT" | "QUERY",
-  "insert": {{
-    "Knowledge": "text supplied by user",
-    "Reference": "any reference words",
-    "Date": "YYYY-MM-DD"
-  }},
-  "query": "re-phrased question for lookup"
-}}
-
-Rules:
-• user_intent = "INSERT" when user adds/saves info, else "QUERY".
-• If intent is QUERY, set "insert" to {{}} and fill "query".
-• If intent is INSERT, set "query" to "" and fill "insert".
-• If Date is missing, default to "{currdate}".
+#######################################################################
+# NEW: one-shot router that returns user_intent, insert, query
+#######################################################################
+def llm_router(query: str) -> dict:
+    """
+    Returns JSON:
+      {
+        "user_intent": "INSERT" | "QUERY",
+        "insert": { ... },   # present if intent == INSERT else {}
+        "query":  { ... }    # present if intent == QUERY  else {}
+      }
+    """
+    system_prompt = f"""
+You are an assistant that MUST respond with valid JSON ONLY.
+Return three top-level keys:
+  "user_intent" – INSERT or QUERY (uppercase).
+  "insert"      – object with keys Knowledge, Reference, Date (YYYY-MM-DD) for an INSERT.
+  "query"       – object with key list "keywords" for a QUERY.
+If user_intent is INSERT, leave "query" empty {{}}.
+If user_intent is QUERY, leave "insert" empty {{}}.
+Example INSERT:
+{{"user_intent":"INSERT","insert":{{"Knowledge":"I love filter coffee","Reference":words that help in fetching the data faster,"Date":"{currdate}"}},"query":{{}}}}
+Example QUERY:
+{{"user_intent":"QUERY","insert":{{}},"query":{{"keywords":["coffee","love"]}}}}
 """
-    raw = call_llm([{"role":"system","content":sys_prompt},
-                    {"role":"user","content":user_input}])
-    try:
-        data = json.loads(raw)
-        if all(k in data for k in ("user_intent","insert","query")):
-            return data
-    except Exception: pass   # fall back if LLM mis-formatted
+    raw = call_llm([
+        {"role": "system", "content": system_prompt},
+        {"role": "user",   "content": query}
+    ])
+    return json.loads(raw)
+#######################################################################
 
-    # Fallback – classify quickly
-    fallback_intent = "INSERT" if any(w in user_input.lower() for w in ["add","save","remember","store"]) and len(user_input.split())>1 else "QUERY"
-    return {"user_intent":fallback_intent,
-            "insert": {"Knowledge":user_input,"Reference":"","Date":currdate} if fallback_intent=="INSERT" else {},
-            "query": user_input if fallback_intent=="QUERY" else ""}
+def insert_airtable(fields: dict) -> dict:
+    url     = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_ID}"
+    headers = {"Authorization": f"Bearer {AIRTABLE_TOKEN}", "Content-Type": "application/json"}
+    payload = {"records": [{"fields": fields}]}
+    resp    = session_req.post(url, headers=headers, json=payload)
+    resp.raise_for_status()
+    return resp.json()
 
-# ---------- Airtable ----------
-def airtable_insert(fields):
-    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_ID}"
-    hdr = {"Authorization":f"Bearer {AIRTABLE_TOKEN}","Content-Type":"application/json"}
-    session_req.post(url,headers=hdr,json={"records":[{"fields":fields}]}).raise_for_status()
+def extract_reference_keywords_llm(query: str) -> list:
+    out = call_llm([
+        {"role": "system", "content": "Extract key reference words from the query. Reply comma-separated. If input is one word, just return that word."},
+        {"role": "user",   "content": query}
+    ])
+    return [w.strip() for w in out.split(",") if w.strip()]
 
-def airtable_search(words):
-    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_ID}"
-    hdr = {"Authorization":f"Bearer {AIRTABLE_TOKEN}"}
-    seen, out = set(), []
-    for w in words:
-        formula = f"FIND('{w.lower()}', LOWER({{Reference}}))"
-        r = session_req.get(url,headers=hdr,params={"filterByFormula":formula}); r.raise_for_status()
-        for rec in r.json().get("records",[]):
-            if rec["id"] not in seen:
-                seen.add(rec["id"]); out.append(rec)
-    return out
+def search_airtable_by_reference(keywords: list) -> list:
+    results, seen_ids = [], set()
+    base_url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_ID}"
+    headers  = {"Authorization": f"Bearer {AIRTABLE_TOKEN}"}
+    for kw in keywords:
+        formula = f"FIND('{kw.lower()}', LOWER({{Reference}}))"
+        resp    = session_req.get(base_url, headers=headers, params={"filterByFormula": formula})
+        resp.raise_for_status()
+        for r in resp.json().get("records", []):
+            if r["id"] not in seen_ids:
+                seen_ids.add(r["id"])
+                results.append(r)
+    return results
 
-def extract_keywords(query):
-    raw = call_llm([{"role":"system","content":"Give comma-separated key words."},
-                    {"role":"user","content":query}])
-    return [w.strip() for w in raw.split(",") if w.strip()]
+def llm_answer_using_records(query: str, records: list) -> str:
+    context = "\n".join([json.dumps(r.get("fields", {}), ensure_ascii=False) for r in records]) or "No records."
+    system_prompt = (
+        "You are an assistant that answers ONLY using the Airtable records provided.\n"
+        "- 'I', 'me', 'myself' = Krishna (the user). Address him in second person ('you').\n"
+        "- Use only facts from records. If missing, say you don’t know.\n"
+        "- Keep answer concise."
+    )
+    return call_llm([
+        {"role": "system", "content": system_prompt},
+        {"role": "user",   "content": f"User query: {query}\n\nRecords:\n{context}"}
+    ])
 
-def answer_from_records(query, records):
-    context = "\n".join(json.dumps(r["fields"],ensure_ascii=False) for r in records) or "No records."
-    sys = ("Answer ONLY from these Airtable records.\n"
-           "Address Krishna as 'you'.  If answer not found, say you don't know.")
-    return call_llm([{"role":"system","content":sys},
-                     {"role":"user","content":f"{query}\n\nRecords:\n{context}"}])
+# ---------- HTML templates ----------
+LOGIN_HTML = """
+<!doctype html>
+<title>Memory Bot - Login</title>
+<style>
+body{background:#121212;color:#eee;font-family:Arial;padding:2em}
+input,button{padding:0.5em;border-radius:5px;border:none}
+button{background:#1e88e5;color:white;cursor:pointer}
+</style>
+<h2>Memory Bot - Sign in</h2>
+{% with messages = get_flashed_messages() %}
+  {% if messages %}
+    <ul style="color:red;">{% for m in messages %}<li>{{ m }}</li>{% endfor %}</ul>
+  {% endif %}
+{% endwith %}
+<form method="post" action="{{ url_for('login') }}">
+  <input type="password" name="password" placeholder="Password" autofocus required>
+  <button type="submit">Sign in</button>
+</form>
+"""
 
-# ---------- HTML ----------
-LOGIN_HTML = """<!doctype html><title>Login</title><form method=post>
-<input type=password name=password placeholder=Password autofocus required>
-<button>Sign in</button></form>"""
-
-MAIN_HTML = """<!doctype html><title>MemoryBot</title>
-<form method=post><textarea name=query rows=4 style=width:100%%></textarea>
-<button>Submit</button></form>
-{% if result %}<pre>{{ result }}</pre>{% endif %}"""
+MAIN_HTML = """
+<!doctype html>
+<title>Memory Bot</title>
+<style>
+body{background:#121212;color:#eee;font-family:Arial;padding:2em}
+textarea{width:100%;padding:0.7em;border-radius:8px;border:none;resize:vertical;background:#1e1e1e;color:#fff}
+button{margin-top:1em;padding:0.7em 1.2em;border:none;border-radius:8px;background:#1e88e5;color:white;cursor:pointer}
+pre{background:#1e1e1e;padding:1em;border-radius:8px;white-space:pre-wrap}
+</style>
+<h2>Memory Bot</h2>
+<p>Signed in as <strong>Krishna</strong>. <a href="{{ url_for('logout') }}" style="color:#90caf9;">Logout</a></p>
+<form method="post" action="{{ url_for('ask') }}" id="queryForm">
+  <label>Enter query or statement:</label><br>
+  <textarea name="query" rows="4" placeholder="e.g. My graduation day was on July 10, 2015 OR When did I graduate?" required></textarea><br>
+  <button type="submit">Submit</button>
+</form>
+{% if result %}
+<hr>
+<h3>Answer</h3>
+<pre>{{ result }}</pre>
+{% endif %}
+<script>
+document.getElementById("queryForm").addEventListener("keydown",function(e){
+  if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();this.submit();}
+});
+</script>
+"""
 
 # ---------- Routes ----------
-@app.route("/",methods=["GET"])
+@app.route("/", methods=["GET"])
 def index():
-    return render_template_string(LOGIN_HTML if not session.get("ok") else MAIN_HTML,result=None)
+    if not session.get("authed"):
+        return render_template_string(LOGIN_HTML)
+    return render_template_string(MAIN_HTML, result=None)
 
-@app.route("/login",methods=["POST"])
+@app.route("/login", methods=["POST"])
 def login():
-    if request.form.get("password")==UI_PASSWORD:
-        session["ok"]=True; return redirect("/")
-    flash("Wrong password"); return redirect("/")
+    if request.form.get("password") == UI_PASSWORD:
+        session["authed"] = True
+        return redirect(url_for("index"))
+    flash("Invalid password")
+    return redirect(url_for("index"))
 
 @app.route("/logout")
-def logout(): session.clear(); return redirect("/")
+def logout():
+    session.clear()
+    return redirect(url_for("index"))
 
-@app.route("/",methods=["POST"])
+@app.route("/ask", methods=["POST"])
 def ask():
-    if not session.get("ok"): return redirect("/")
-    q = request.form.get("query","").strip()
-    if not q: flash("Enter something"); return redirect("/")
+    if not session.get("authed"):
+        return redirect(url_for("index"))
+    query = request.form.get("query", "").strip()
+    if not query:
+        flash("Query required")
+        return redirect(url_for("index"))
 
     try:
-        data = llm_one_shot(q)
-        if data["user_intent"]=="INSERT":
-            airtable_insert(data["insert"])
-            result = "✅ Memory saved, macha!"
-        else:
-            keywords = extract_keywords(data["query"])
-            recs = airtable_search(keywords)
-            result = answer_from_records(data["query"], recs)
+        # -------- ONE LLM CALL ----------
+        route = llm_router(query)
+
+        if route["user_intent"] == "INSERT":
+            # Fill defaults in case model left something blank
+            fields = {
+                "Knowledge": route["insert"].get("Knowledge", query),
+                "Reference": route["insert"].get("Reference", ""),
+                "Date":      route["insert"].get("Date", currdate)
+            }
+            insert_airtable(fields)
+            result = "✅ Saved your memory successfully."
+
+        else:  # QUERY
+            keywords = route["query"].get("keywords") or extract_reference_keywords_llm(query)
+            records  = search_airtable_by_reference(keywords)
+            result   = llm_answer_using_records(query, records)
+
+        return render_template_string(MAIN_HTML, result=result)
+
     except Exception as e:
-        result = f"Error: {e}"
+        return render_template_string(MAIN_HTML, result=f"Error: {e}")
 
-    return render_template_string(MAIN_HTML,result=result)
-
-# ---------- Run ----------
-if __name__=="__main__":
-    app.run(host="0.0.0.0",port=int(os.getenv("PORT",5000)))
+# ---------- Main ----------
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
