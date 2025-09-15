@@ -6,54 +6,72 @@ import requests
 from datetime import datetime
 from flask import Flask, request, render_template_string, redirect, url_for, session, flash
 from dotenv import load_dotenv
+
 load_dotenv()
 currdate = datetime.now().strftime("%Y-%m-%d")
+
 # --- Config from environment ---
 AIRTABLE_TOKEN = os.environ.get("AIRTABLE_TOKEN")
 AIRTABLE_BASE_ID = os.environ.get("AIRTABLE_BASE_ID")
 AIRTABLE_TABLE_ID = os.environ.get("AIRTABLE_TABLE_ID")
+
 # OpenRouter keys
 OPENROUTER_KEYS = [os.environ[k] for k in os.environ if k.startswith("OPENROUTER_API_KEY_")]
 OPENROUTER_KEYS = [k for k in OPENROUTER_KEYS if k]
-OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openai/gpt-oss-20b:free")
+OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o-mini")
+
 # Gemini keys
 GEMINI_KEYS = [os.environ[k] for k in os.environ if k.startswith("GEMINI_API_KEY_")]
 GEMINI_KEYS = [k for k in GEMINI_KEYS if k]
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-pro")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-1.5-pro")
+
 UI_PASSWORD = os.environ.get("UI_PASSWORD")
 FLASK_SECRET = os.environ.get("FLASK_SECRET")
+
 if not AIRTABLE_TOKEN or not AIRTABLE_BASE_ID or not AIRTABLE_TABLE_ID:
     raise RuntimeError("Set AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_ID in env")
+
 if not OPENROUTER_KEYS and not GEMINI_KEYS:
     raise RuntimeError("Provide at least one OPENROUTER_API_KEY_x or GEMINI_API_KEY_x")
+
 app = Flask(__name__)
 app.secret_key = FLASK_SECRET
+
 # global indexes
 openrouter_index = 0
 gemini_index = 0
 session_req = requests.Session()
+
 def get_next_openrouter_key():
     global openrouter_index
+    if not OPENROUTER_KEYS:
+        raise RuntimeError("No OpenRouter keys available")
     key = OPENROUTER_KEYS[openrouter_index % len(OPENROUTER_KEYS)]
     openrouter_index += 1
     return key
+
 def get_next_gemini_key():
     global gemini_index
+    if not GEMINI_KEYS:
+        raise RuntimeError("No Gemini keys available")
     key = GEMINI_KEYS[gemini_index % len(GEMINI_KEYS)]
     gemini_index += 1
     return key
+
 def call_openrouter_llm(messages, timeout=20):
     url = "https://openrouter.ai/api/v1/chat/completions"
     last_err = None
+    
     for _ in range(len(OPENROUTER_KEYS)):
         api_key = get_next_openrouter_key()
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         payload = {"model": OPENROUTER_MODEL, "messages": messages, "temperature": 0.4}
+        
         try:
             resp = session_req.post(url, headers=headers, json=payload, timeout=timeout)
             if resp.status_code == 200:
                 data = resp.json()
-                if data.get("choices"):
+                if data.get("choices") and len(data["choices"]) > 0:
                     msg = data["choices"][0].get("message", {}).get("content") or data["choices"][0].get("text", "")
                     if msg:
                         return msg.strip()
@@ -62,47 +80,110 @@ def call_openrouter_llm(messages, timeout=20):
                 last_err = RuntimeError(f"Status {resp.status_code}: {resp.text}")
         except Exception as e:
             last_err = e
+    
     raise RuntimeError(f"All OpenRouter keys failed. Last error: {last_err}")
-def call_gemini_llm(messages, timeout=20):
-    url_template = "https://generativelanguage.googleapis.com/v1/models/{model}:generateContent?key={api_key}"
+
+def call_gemini_llm(messages, timeout=30):
+    url_template = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     last_err = None
-    text_input = "\n".join([m["content"] for m in messages if m.get("content")])
-    payload = {"contents": [{"parts": [{"text": text_input}]}]}
+    
+    # Convert messages to Gemini format properly
+    gemini_contents = []
+    for msg in messages:
+        if msg.get("content"):
+            role = "user" if msg.get("role") == "user" else "model"
+            gemini_contents.append({
+                "role": role,
+                "parts": [{"text": msg["content"]}]
+            })
+    
+    # If no proper conversation, combine all content
+    if not gemini_contents:
+        text_input = "\n".join([m["content"] for m in messages if m.get("content")])
+        gemini_contents = [{"parts": [{"text": text_input}]}]
+    
+    payload = {
+        "contents": gemini_contents,
+        "generationConfig": {
+            "temperature": 0.4,
+            "topK": 40,
+            "topP": 0.95,
+            "maxOutputTokens": 8192,
+        },
+        "safetySettings": [
+            {
+                "category": "HARM_CATEGORY_HARASSMENT",
+                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+            },
+            {
+                "category": "HARM_CATEGORY_HATE_SPEECH", 
+                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+            },
+            {
+                "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+            },
+            {
+                "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+            }
+        ]
+    }
+    
     for _ in range(len(GEMINI_KEYS)):
         api_key = get_next_gemini_key()
-        url = url_template.format(model=GEMINI_MODEL, api_key=api_key)
+        url = f"{url_template.format(model=GEMINI_MODEL)}?key={api_key}"
+        headers = {"Content-Type": "application/json"}
+        
         try:
-            resp = session_req.post(url, json=payload, timeout=timeout)
+            resp = session_req.post(url, headers=headers, json=payload, timeout=timeout)
+            print(f"Gemini Response Status: {resp.status_code}")  # Debug line
+            print(f"Gemini Response: {resp.text[:500]}")  # Debug line
+            
             if resp.status_code == 200:
                 data = resp.json()
                 try:
-                    msg = data["candidates"][0]["content"]["parts"][0].get("text", "")
+                    msg = data["candidates"][0]["content"]["parts"][0]["text"]
                     if msg:
                         return msg.strip()
-                except Exception as e:
-                    last_err = e
+                except (KeyError, IndexError) as e:
+                    print(f"Gemini parsing error: {e}")
+                    print(f"Response data: {data}")
+                    last_err = RuntimeError(f"Gemini response parsing failed: {e}")
             else:
                 last_err = RuntimeError(f"Gemini status {resp.status_code}: {resp.text}")
+        except requests.exceptions.RequestException as e:
+            last_err = RuntimeError(f"Gemini request failed: {e}")
         except Exception as e:
-            last_err = e
+            last_err = RuntimeError(f"Gemini unexpected error: {e}")
+    
     raise RuntimeError(f"All Gemini keys failed. Last error: {last_err}")
 
 def call_llm(messages):
     try:
         if GEMINI_KEYS:
             return call_gemini_llm(messages)
-        raise RuntimeError("No Gemini keys configured.")
-    except Exception:
-        if OPENROUTER_KEYS:
+        elif OPENROUTER_KEYS:
             return call_openrouter_llm(messages)
+        else:
+            raise RuntimeError("No API keys configured.")
+    except Exception as e:
+        print(f"Gemini failed: {e}")
+        if OPENROUTER_KEYS:
+            try:
+                return call_openrouter_llm(messages)
+            except Exception as e2:
+                raise RuntimeError(f"Both APIs failed. Gemini: {e}, OpenRouter: {e2}")
         raise
+
 def classify_intent(query: str) -> str:
     system_prompt = (
         "You are a classifier. If the user is adding/storing/saving new information, reply exactly: INSERT. "
-        "If the user is asking/retrieving/searching for info, reply exactly: QUERY. Reply only with INSERT or QUERY."
+        "If the user is asking/retrieving/searching for info, reply exactly: QUERY. Reply only with INSERT or QUERY. "
         "If the input is just one word then it is only QUERY"
     )
     return call_llm([{"role": "system", "content": system_prompt}, {"role": "user", "content": query}]).strip().upper()
+
 def extract_insert_fields(query: str) -> dict:
     system_prompt = (
         "You are an extractor. Given the user's statement, output valid JSON (use double quotes) with keys:\n"
@@ -117,6 +198,7 @@ def extract_insert_fields(query: str) -> dict:
         return parsed
     except Exception:
         return {"Knowledge": query, "Reference": "", "Date": currdate}
+
 def insert_airtable(fields: dict) -> dict:
     url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_ID}"
     headers = {"Authorization": f"Bearer {AIRTABLE_TOKEN}", "Content-Type": "application/json"}
@@ -124,16 +206,19 @@ def insert_airtable(fields: dict) -> dict:
     resp = session_req.post(url, headers=headers, json=payload)
     resp.raise_for_status()
     return resp.json()
+
 def extract_reference_keywords(query: str) -> list:
     out = call_llm(
         [{"role": "system", "content": "Extract key reference words from the query. Reply comma-separated. If input is one word, just return that word."},
          {"role": "user", "content": query}]
     )
     return [w.strip() for w in out.split(",") if w.strip()]
+
 def search_airtable_by_reference(keywords: list) -> list:
     results, seen_ids = [], set()
     base_url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_ID}"
     headers = {"Authorization": f"Bearer {AIRTABLE_TOKEN}"}
+    
     for kw in keywords:
         formula = f"FIND('{kw.lower()}', LOWER({{Reference}}))"
         resp = session_req.get(base_url, headers=headers, params={"filterByFormula": formula})
@@ -143,18 +228,20 @@ def search_airtable_by_reference(keywords: list) -> list:
                 seen_ids.add(r["id"])
                 results.append(r)
     return results
+
 def llm_answer_using_records(query: str, records: list) -> str:
     context = "\n".join([json.dumps(r.get("fields", {}), ensure_ascii=False) for r in records]) or "No records."
     system_prompt = (
         "You are an assistant that answers ONLY using Airtable records provided.\n"
         "- 'I', 'me', 'myself' = Krishna (the user). Address him in second person ('you').\n"
-        "- Use only facts from records. If missing, say you don’t know.\n"
+        "- Use only facts from records. If missing, say you don't know.\n"
         "- Keep answer concise."
     )
     return call_llm([
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": f"User query: {query}\n\nRecords:\n{context}"}
     ])
+
 LOGIN_HTML = """
 <!doctype html>
 <title>Memory Bot - Login</title>
@@ -174,6 +261,7 @@ button { background:#1e88e5; color:white; cursor:pointer; }
   <button type="submit">Sign in</button>
 </form>
 """
+
 MAIN_HTML = """
 <!doctype html>
 <title>Memory Bot</title>
@@ -204,11 +292,13 @@ document.getElementById("queryForm").addEventListener("keydown", function(e) {
 });
 </script>
 """
+
 @app.route("/", methods=["GET"])
 def index():
     if not session.get("authed"):
         return render_template_string(LOGIN_HTML)
     return render_template_string(MAIN_HTML, result=None)
+
 @app.route("/login", methods=["POST"])
 def login():
     if request.form.get("password") == UI_PASSWORD:
@@ -216,18 +306,22 @@ def login():
         return redirect(url_for("index"))
     flash("Invalid password")
     return redirect(url_for("index"))
+
 @app.route("/logout")
 def logout():
     session.clear()
     return redirect(url_for("index"))
+
 @app.route("/ask", methods=["POST"])
 def ask():
     if not session.get("authed"):
         return redirect(url_for("index"))
+    
     query = request.form.get("query", "").strip()
     if not query:
         flash("Query required")
         return redirect(url_for("index"))
+    
     try:
         intent = classify_intent(query)
         if intent == "INSERT":
@@ -240,7 +334,9 @@ def ask():
             result = llm_answer_using_records(query, records)
         return render_template_string(MAIN_HTML, result=result)
     except Exception as e:
+        print(f"Error in ask route: {e}")  # Debug line
         return render_template_string(MAIN_HTML, result=f"Error: {e}")
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, debug=True)
