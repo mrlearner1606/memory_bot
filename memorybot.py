@@ -57,6 +57,7 @@ def classify_intent(query: str) -> str:
     system_prompt = (
         "You are a classifier. If the user is adding/storing/saving new information, reply exactly: INSERT. "
         "If the user is asking/retrieving/searching for info, reply exactly: QUERY. Reply only with INSERT or QUERY."
+        "If the input is just one word then it is only QUERY"
     )
     return call_openrouter_llm(
         [{"role": "system", "content": system_prompt}, {"role": "user", "content": query}]
@@ -97,7 +98,7 @@ def insert_airtable(fields: dict) -> dict:
 
 def extract_reference_keywords(query: str) -> list:
     out = call_openrouter_llm(
-        [{"role": "system", "content": "Extract key reference words from the query. Reply comma-separated."},
+        [{"role": "system", "content": "Extract key reference words from the query. Reply comma-separated. if the user input is only one word then oonly use that"},
          {"role": "user", "content": query}]
     )
     return [w.strip() for w in out.split(",") if w.strip()]
