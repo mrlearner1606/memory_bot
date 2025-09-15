@@ -67,18 +67,7 @@ def call_gemini_llm(messages, timeout=20):
     url_template = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
     last_err = None
     text_input = "\n".join([m["content"] for m in messages if m.get("content")])
-    payload = {
-    "contents": [
-        {
-            "parts": [
-                {"text": text_input}
-            ]
-        }
-    ],
-    "generationConfig": {
-        "temperature": 0.7  # adjust as needed
-    }
-    }
+    payload = {"contents": [{"parts": [{"text": text_input}]}]}
     for _ in range(len(GEMINI_KEYS)):
         api_key = get_next_gemini_key()
         url = url_template.format(model=GEMINI_MODEL, api_key=api_key)
