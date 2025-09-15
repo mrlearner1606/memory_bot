@@ -1,6 +1,8 @@
+# app.py
 import os
 import ast
 import json
+import time
 import requests
 from datetime import datetime
 from flask import Flask, request, render_template_string, redirect, url_for, session, flash
@@ -14,7 +16,15 @@ AIRTABLE_BASE_ID = os.environ.get("AIRTABLE_BASE_ID")
 AIRTABLE_TABLE_ID = os.environ.get("AIRTABLE_TABLE_ID")
 
 # OpenRouter keys
-OPENROUTER_KEYS = [os.environ.get(f"OPENROUTER_API_KEY_{i}") for i in range(1, 4)]
+OPENROUTER_KEYS = []
+i = 1
+while True:
+    try:
+        key = os.environ[f"OPENROUTER_API_KEY_{i}"]
+        OPENROUTER_KEYS.append(key)
+        i += 1
+    except:
+        break
 OPENROUTER_KEYS = [k for k in OPENROUTER_KEYS if k]  # filter out None
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openai/gpt-oss-20b:free")
 
@@ -30,32 +40,69 @@ app = Flask(__name__)
 app.secret_key = FLASK_SECRET
 
 
-def call_openrouter_llm(messages, timeout=30):
+# global index for rotation
+key_index = 0
+
+def get_next_openrouter_key():
+    """Return the next key in round-robin order."""
+    global key_index
+    key = OPENROUTER_KEYS[key_index % len(OPENROUTER_KEYS)]
+    key_index += 1
+    return key
+
+def call_openrouter_llm(messages, per_key_retries=3, timeout=30, backoff_factor=1.0):
     """
-    Try each OpenRouter key in strict order until one succeeds.
-    Raises the last encountered exception only if all keys fail.
+    Round-robin key rotation across requests.
+    For each request: start with the next key in rotation.
+    If that key fails, fall back to the remaining keys in order.
     """
-    last_err = None
     url = "https://openrouter.ai/api/v1/chat/completions"
+    last_err = None
 
-    for api_key in OPENROUTER_KEYS:
-        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-        payload = {"model": OPENROUTER_MODEL, "messages": messages, "temperature": 0.4}
+    # start from the next key in rotation
+    start_index = (key_index - 1) % len(OPENROUTER_KEYS)
+    ordered_keys = OPENROUTER_KEYS[start_index:] + OPENROUTER_KEYS[:start_index]
 
-        try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
-            resp.raise_for_status()
-            data = resp.json()
+    for idx, api_key in enumerate(ordered_keys, start=1):
+        attempt = 0
+        while attempt < per_key_retries:
+            attempt += 1
+            wait = backoff_factor * (2 ** (attempt - 1))
+            headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+            payload = {"model": OPENROUTER_MODEL, "messages": messages, "temperature": 0.4}
 
-            if data.get("choices"):
-                msg = data["choices"][0].get("message", {}).get("content") \
-                      or data["choices"][0].get("text", "")
-                return msg.strip()
+            try:
+                resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get("choices"):
+                        msg = data["choices"][0].get("message", {}).get("content") \
+                              or data["choices"][0].get("text", "")
+                        if msg:
+                            return msg.strip()
+                        last_err = RuntimeError(f"Key #{idx} response missing message content.")
+                    else:
+                        last_err = RuntimeError(f"Key #{idx} response missing 'choices'.")
+                else:
+                    last_err = RuntimeError(f"Key #{idx} returned status {resp.status_code}: {resp.text}")
 
-            last_err = ValueError("No 'choices' in response")
-        except Exception as e:
-            last_err = e
-            continue
+                # retry on transient issues
+                if resp.status_code in (429, 500, 502, 503, 504) and attempt < per_key_retries:
+                    time.sleep(wait)
+                    continue
+                else:
+                    break
+
+            except requests.exceptions.RequestException as e:
+                last_err = e
+                if attempt < per_key_retries:
+                    time.sleep(wait)
+                    continue
+                else:
+                    break
+
+        # move to next key if this one exhausted
+        continue
 
     raise RuntimeError(f"All OpenRouter keys failed. Last error: {last_err}")
 
@@ -239,8 +286,8 @@ def ask():
             result = llm_answer_using_records(query, records)
         return render_template_string(MAIN_HTML, result=result)
     except Exception as e:
+        # show full traceback-ish message for debugging in UI
         return render_template_string(MAIN_HTML, result=f"Error: {e}")
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
