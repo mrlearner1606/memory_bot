@@ -8,6 +8,7 @@ from flask import Flask, request, render_template_string, redirect, url_for, ses
 from dotenv import load_dotenv
 load_dotenv()
 
+currdate = datetime.now().strftime("%Y-%m-%d")
 # --- Config from environment ---
 AIRTABLE_TOKEN = os.environ.get("AIRTABLE_TOKEN")
 AIRTABLE_BASE_ID = os.environ.get("AIRTABLE_BASE_ID")
@@ -65,7 +66,7 @@ def classify_intent(query: str) -> str:
 def extract_insert_fields(query: str) -> dict:
     system_prompt = (
         "You are an extractor. Given the user's statement, output valid JSON (use double quotes) with keys:\n"
-        "- Knowledge\n- Reference\n- Date (ISO YYYY-MM-DD or empty)\n\n"
+        f"- Knowledge\n- Reference\n- Date (ISO YYYY-MM-DD or {currdate})\n\n"
         "Return only JSON. Example:\n"
         '{"Knowledge":"I graduated on July 10, 2015","Reference":"graduation,education,college","Date":"2015-07-10"}'
     )
