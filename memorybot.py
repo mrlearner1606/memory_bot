@@ -1,57 +1,47 @@
 import os
+import ast
 import json
 import time
 import requests
 from datetime import datetime
 from flask import Flask, request, render_template_string, redirect, url_for, session, flash
 from dotenv import load_dotenv
-
 load_dotenv()
 currdate = datetime.now().strftime("%Y-%m-%d")
-
 # --- Config from environment ---
-AIRTABLE_TOKEN    = os.environ.get("AIRTABLE_TOKEN")
-AIRTABLE_BASE_ID  = os.environ.get("AIRTABLE_BASE_ID")
+AIRTABLE_TOKEN = os.environ.get("AIRTABLE_TOKEN")
+AIRTABLE_BASE_ID = os.environ.get("AIRTABLE_BASE_ID")
 AIRTABLE_TABLE_ID = os.environ.get("AIRTABLE_TABLE_ID")
-
 # OpenRouter keys
-OPENROUTER_KEYS  = [os.environ[k] for k in os.environ if k.startswith("OPENROUTER_API_KEY_")]
-OPENROUTER_KEYS  = [k for k in OPENROUTER_KEYS if k]
+OPENROUTER_KEYS = [os.environ[k] for k in os.environ if k.startswith("OPENROUTER_API_KEY_")]
+OPENROUTER_KEYS = [k for k in OPENROUTER_KEYS if k]
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openai/gpt-oss-20b:free")
-
 # Gemini keys
-GEMINI_KEYS  = [os.environ[k] for k in os.environ if k.startswith("GEMINI_API_KEY_")]
-GEMINI_KEYS  = [k for k in GEMINI_KEYS if k]
+GEMINI_KEYS = [os.environ[k] for k in os.environ if k.startswith("GEMINI_API_KEY_")]
+GEMINI_KEYS = [k for k in GEMINI_KEYS if k]
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
-
-UI_PASSWORD  = os.environ.get("UI_PASSWORD")
+UI_PASSWORD = os.environ.get("UI_PASSWORD")
 FLASK_SECRET = os.environ.get("FLASK_SECRET")
-
 if not AIRTABLE_TOKEN or not AIRTABLE_BASE_ID or not AIRTABLE_TABLE_ID:
     raise RuntimeError("Set AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_ID in env")
 if not OPENROUTER_KEYS and not GEMINI_KEYS:
     raise RuntimeError("Provide at least one OPENROUTER_API_KEY_x or GEMINI_API_KEY_x")
-
 app = Flask(__name__)
 app.secret_key = FLASK_SECRET
-
 # global indexes
 openrouter_index = 0
-gemini_index     = 0
-session_req      = requests.Session()
-
+gemini_index = 0
+session_req = requests.Session()
 def get_next_openrouter_key():
     global openrouter_index
     key = OPENROUTER_KEYS[openrouter_index % len(OPENROUTER_KEYS)]
     openrouter_index += 1
     return key
-
 def get_next_gemini_key():
     global gemini_index
     key = GEMINI_KEYS[gemini_index % len(GEMINI_KEYS)]
     gemini_index += 1
     return key
-
 def call_openrouter_llm(messages, timeout=20):
     url = "https://openrouter.ai/api/v1/chat/completions"
     last_err = None
@@ -73,15 +63,14 @@ def call_openrouter_llm(messages, timeout=20):
         except Exception as e:
             last_err = e
     raise RuntimeError(f"All OpenRouter keys failed. Last error: {last_err}")
-
 def call_gemini_llm(messages, timeout=20):
     url_template = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-    last_err   = None
+    last_err = None
     text_input = "\n".join([m["content"] for m in messages if m.get("content")])
-    payload    = {"contents": [{"parts": [{"text": text_input}]}]}
+    payload = {"contents": [{"parts": [{"text": text_input}]}]}
     for _ in range(len(GEMINI_KEYS)):
         api_key = get_next_gemini_key()
-        url     = url_template.format(model=GEMINI_MODEL, api_key=api_key)
+        url = url_template.format(model=GEMINI_MODEL, api_key=api_key)
         try:
             resp = session_req.post(url, json=payload, timeout=timeout)
             if resp.status_code == 200:
@@ -97,7 +86,6 @@ def call_gemini_llm(messages, timeout=20):
         except Exception as e:
             last_err = e
     raise RuntimeError(f"All Gemini keys failed. Last error: {last_err}")
-
 def call_llm(messages):
     try:
         if GEMINI_KEYS:
@@ -107,94 +95,77 @@ def call_llm(messages):
         if OPENROUTER_KEYS:
             return call_openrouter_llm(messages)
         raise
-
-#######################################################################
-# NEW: one-shot router that returns user_intent, insert, query
-#######################################################################
-def llm_router(query: str) -> dict:
-    """
-    Returns JSON:
-      {
-        "user_intent": "INSERT" | "QUERY",
-        "insert": { ... },   # present if intent == INSERT else {}
-        "query":  { ... }    # present if intent == QUERY  else {}
-      }
-    """
-    system_prompt = f"""
-You are an assistant that MUST respond with valid JSON ONLY.
-Return three top-level keys:
-  "user_intent" – INSERT or QUERY (uppercase).
-  "insert"      – object with keys Knowledge, Reference, Date (YYYY-MM-DD) for an INSERT.
-  "query"       – object with key list "keywords" for a QUERY.
-If user_intent is INSERT, leave "query" empty {{}}.
-If user_intent is QUERY, leave "insert" empty {{}}.
-Example INSERT:
-{{"user_intent":"INSERT","insert":{{"Knowledge":"I love filter coffee","Reference":words that help in fetching the data faster,"Date":"{currdate}"}},"query":{{}}}}
-Example QUERY:
-{{"user_intent":"QUERY","insert":{{}},"query":{{"keywords":["coffee","love"]}}}}
-"""
-    raw = call_llm([
-        {"role": "system", "content": system_prompt},
-        {"role": "user",   "content": query}
-    ])
-    return json.loads(raw)
-#######################################################################
-
+def classify_intent(query: str) -> str:
+    system_prompt = (
+        "You are a classifier. If the user is adding/storing/saving new information, reply exactly: INSERT. "
+        "If the user is asking/retrieving/searching for info, reply exactly: QUERY. Reply only with INSERT or QUERY."
+        "If the input is just one word then it is only QUERY"
+    )
+    return call_llm([{"role": "system", "content": system_prompt}, {"role": "user", "content": query}]).strip().upper()
+def extract_insert_fields(query: str) -> dict:
+    system_prompt = (
+        "You are an extractor. Given the user's statement, output valid JSON (use double quotes) with keys:\n"
+        f"- Knowledge\n- Reference\n- Date (ISO YYYY-MM-DD or {currdate})\n\n"
+        "Return only JSON."
+    )
+    out = call_llm([{"role": "system", "content": system_prompt}, {"role": "user", "content": query}])
+    try:
+        parsed = json.loads(out)
+        for k in ("Knowledge", "Reference", "Date"):
+            parsed.setdefault(k, "")
+        return parsed
+    except Exception:
+        return {"Knowledge": query, "Reference": "", "Date": currdate}
 def insert_airtable(fields: dict) -> dict:
-    url     = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_ID}"
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_ID}"
     headers = {"Authorization": f"Bearer {AIRTABLE_TOKEN}", "Content-Type": "application/json"}
     payload = {"records": [{"fields": fields}]}
-    resp    = session_req.post(url, headers=headers, json=payload)
+    resp = session_req.post(url, headers=headers, json=payload)
     resp.raise_for_status()
     return resp.json()
-
-def extract_reference_keywords_llm(query: str) -> list:
-    out = call_llm([
-        {"role": "system", "content": "Extract key reference words from the query. Reply comma-separated. If input is one word, just return that word."},
-        {"role": "user",   "content": query}
-    ])
+def extract_reference_keywords(query: str) -> list:
+    out = call_llm(
+        [{"role": "system", "content": "Extract key reference words from the query. Reply comma-separated. If input is one word, just return that word."},
+         {"role": "user", "content": query}]
+    )
     return [w.strip() for w in out.split(",") if w.strip()]
-
 def search_airtable_by_reference(keywords: list) -> list:
     results, seen_ids = [], set()
     base_url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_ID}"
-    headers  = {"Authorization": f"Bearer {AIRTABLE_TOKEN}"}
+    headers = {"Authorization": f"Bearer {AIRTABLE_TOKEN}"}
     for kw in keywords:
         formula = f"FIND('{kw.lower()}', LOWER({{Reference}}))"
-        resp    = session_req.get(base_url, headers=headers, params={"filterByFormula": formula})
+        resp = session_req.get(base_url, headers=headers, params={"filterByFormula": formula})
         resp.raise_for_status()
         for r in resp.json().get("records", []):
             if r["id"] not in seen_ids:
                 seen_ids.add(r["id"])
                 results.append(r)
     return results
-
 def llm_answer_using_records(query: str, records: list) -> str:
     context = "\n".join([json.dumps(r.get("fields", {}), ensure_ascii=False) for r in records]) or "No records."
     system_prompt = (
-        "You are an assistant that answers ONLY using the Airtable records provided.\n"
+        "You are an assistant that answers ONLY using Airtable records provided.\n"
         "- 'I', 'me', 'myself' = Krishna (the user). Address him in second person ('you').\n"
         "- Use only facts from records. If missing, say you don’t know.\n"
         "- Keep answer concise."
     )
     return call_llm([
         {"role": "system", "content": system_prompt},
-        {"role": "user",   "content": f"User query: {query}\n\nRecords:\n{context}"}
+        {"role": "user", "content": f"User query: {query}\n\nRecords:\n{context}"}
     ])
-
-# ---------- HTML templates ----------
 LOGIN_HTML = """
 <!doctype html>
 <title>Memory Bot - Login</title>
 <style>
-body{background:#121212;color:#eee;font-family:Arial;padding:2em}
-input,button{padding:0.5em;border-radius:5px;border:none}
-button{background:#1e88e5;color:white;cursor:pointer}
+body { background:#121212; color:#eee; font-family:Arial; padding:2em; }
+input,button { padding:0.5em; border-radius:5px; border:none; }
+button { background:#1e88e5; color:white; cursor:pointer; }
 </style>
 <h2>Memory Bot - Sign in</h2>
 {% with messages = get_flashed_messages() %}
   {% if messages %}
-    <ul style="color:red;">{% for m in messages %}<li>{{ m }}</li>{% endfor %}</ul>
+    <ul style="color: red;">{% for m in messages %}<li>{{ m }}</li>{% endfor %}</ul>
   {% endif %}
 {% endwith %}
 <form method="post" action="{{ url_for('login') }}">
@@ -202,15 +173,14 @@ button{background:#1e88e5;color:white;cursor:pointer}
   <button type="submit">Sign in</button>
 </form>
 """
-
 MAIN_HTML = """
 <!doctype html>
 <title>Memory Bot</title>
 <style>
-body{background:#121212;color:#eee;font-family:Arial;padding:2em}
-textarea{width:100%;padding:0.7em;border-radius:8px;border:none;resize:vertical;background:#1e1e1e;color:#fff}
-button{margin-top:1em;padding:0.7em 1.2em;border:none;border-radius:8px;background:#1e88e5;color:white;cursor:pointer}
-pre{background:#1e1e1e;padding:1em;border-radius:8px;white-space:pre-wrap}
+body { background:#121212; color:#eee; font-family:Arial; padding:2em; }
+textarea { width:100%; padding:0.7em; border-radius:8px; border:none; resize:vertical; background:#1e1e1e; color:#fff; }
+button { margin-top:1em; padding:0.7em 1.2em; border:none; border-radius:8px; background:#1e88e5; color:white; cursor:pointer; }
+pre { background:#1e1e1e; padding:1em; border-radius:8px; white-space:pre-wrap; }
 </style>
 <h2>Memory Bot</h2>
 <p>Signed in as <strong>Krishna</strong>. <a href="{{ url_for('logout') }}" style="color:#90caf9;">Logout</a></p>
@@ -225,19 +195,19 @@ pre{background:#1e1e1e;padding:1em;border-radius:8px;white-space:pre-wrap}
 <pre>{{ result }}</pre>
 {% endif %}
 <script>
-document.getElementById("queryForm").addEventListener("keydown",function(e){
-  if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();this.submit();}
+document.getElementById("queryForm").addEventListener("keydown", function(e) {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    this.submit();
+  }
 });
 </script>
 """
-
-# ---------- Routes ----------
 @app.route("/", methods=["GET"])
 def index():
     if not session.get("authed"):
         return render_template_string(LOGIN_HTML)
     return render_template_string(MAIN_HTML, result=None)
-
 @app.route("/login", methods=["POST"])
 def login():
     if request.form.get("password") == UI_PASSWORD:
@@ -245,12 +215,10 @@ def login():
         return redirect(url_for("index"))
     flash("Invalid password")
     return redirect(url_for("index"))
-
 @app.route("/logout")
 def logout():
     session.clear()
     return redirect(url_for("index"))
-
 @app.route("/ask", methods=["POST"])
 def ask():
     if not session.get("authed"):
@@ -259,32 +227,19 @@ def ask():
     if not query:
         flash("Query required")
         return redirect(url_for("index"))
-
     try:
-        # -------- ONE LLM CALL ----------
-        route = llm_router(query)
-
-        if route["user_intent"] == "INSERT":
-            # Fill defaults in case model left something blank
-            fields = {
-                "Knowledge": route["insert"].get("Knowledge", query),
-                "Reference": route["insert"].get("Reference", ""),
-                "Date":      route["insert"].get("Date", currdate)
-            }
+        intent = classify_intent(query)
+        if intent == "INSERT":
+            fields = extract_insert_fields(query)
             insert_airtable(fields)
             result = "✅ Saved your memory successfully."
-
-        else:  # QUERY
-            keywords = route["query"].get("keywords") or extract_reference_keywords_llm(query)
-            records  = search_airtable_by_reference(keywords)
-            result   = llm_answer_using_records(query, records)
-
+        else:
+            keywords = extract_reference_keywords(query)
+            records = search_airtable_by_reference(keywords)
+            result = llm_answer_using_records(query, records)
         return render_template_string(MAIN_HTML, result=result)
-
     except Exception as e:
         return render_template_string(MAIN_HTML, result=f"Error: {e}")
-
-# ---------- Main ----------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
