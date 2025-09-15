@@ -39,18 +39,40 @@ def get_next_openrouter_key():
     return key
 
 
-def call_openrouter_llm(messages, timeout=30):
-    api_key = get_next_openrouter_key()
-    url = "https://openrouter.ai/api/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    payload = {"model": OPENROUTER_MODEL, "messages": messages, "temperature": 0.0}
-    resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
-    resp.raise_for_status()
-    data = resp.json()
-    if "choices" in data and data["choices"]:
-        msg = data["choices"][0].get("message", {}).get("content")
-        return msg.strip() if msg else data["choices"][0].get("text", "").strip()
-    return json.dumps(data)
+def call_openrouter_llm(messages, max_retries=3, timeout=30):
+    """
+    Try each OpenRouter key in order until one succeeds.
+    Raises the last encountered exception only if all keys fail.
+    """
+    last_err = None
+
+    # Iterate at most len(OPENROUTER_KEYS) times or max_retries—whichever is smaller
+    for _ in range(min(len(OPENROUTER_KEYS), max_retries)):
+        api_key = get_next_openrouter_key()
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        payload = {"model": OPENROUTER_MODEL, "messages": messages, "temperature": 0.4}
+
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+            resp.raise_for_status()                       # raises HTTPError on bad status
+            data = resp.json()
+
+            # Extract text like before
+            if data.get("choices"):
+                msg = data["choices"][0].get("message", {}).get("content") \
+                      or data["choices"][0].get("text", "")
+                return msg.strip()
+
+            # If we reach here, the response is structurally wrong; treat as failure
+            last_err = ValueError("No 'choices' in response")
+        except Exception as e:
+            # Tony Stark voice: “Not ideal, but we’ll keep moving.”
+            last_err = e
+            continue   # try next key
+
+    # All attempts exhausted
+    raise RuntimeError(f"All OpenRouter keys failed. Last error: {last_err}")
 
 
 def classify_intent(query: str) -> str:
