@@ -19,7 +19,7 @@ OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openai/gpt-oss-20b:free")
 # Gemini keys
 GEMINI_KEYS = [os.environ[k] for k in os.environ if k.startswith("GEMINI_API_KEY_")]
 GEMINI_KEYS = [k for k in GEMINI_KEYS if k]
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-pro")
 UI_PASSWORD = os.environ.get("UI_PASSWORD")
 FLASK_SECRET = os.environ.get("FLASK_SECRET")
 if not AIRTABLE_TOKEN or not AIRTABLE_BASE_ID or not AIRTABLE_TABLE_ID:
