@@ -64,7 +64,7 @@ def call_openrouter_llm(messages, timeout=20):
             last_err = e
     raise RuntimeError(f"All OpenRouter keys failed. Last error: {last_err}")
 def call_gemini_llm(messages, timeout=20):
-    url_template = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    url_template = "https://generativelanguage.googleapis.com/v1/models/{model}:generateContent?key={api_key}"
     last_err = None
     text_input = "\n".join([m["content"] for m in messages if m.get("content")])
     payload = {"contents": [{"parts": [{"text": text_input}]}]}
@@ -76,7 +76,7 @@ def call_gemini_llm(messages, timeout=20):
             if resp.status_code == 200:
                 data = resp.json()
                 try:
-                    msg = data["candidates"][0]["content"]["parts"][0]["text"]
+                    msg = data["candidates"][0]["content"]["parts"][0].get("text", "")
                     if msg:
                         return msg.strip()
                 except Exception as e:
@@ -86,6 +86,7 @@ def call_gemini_llm(messages, timeout=20):
         except Exception as e:
             last_err = e
     raise RuntimeError(f"All Gemini keys failed. Last error: {last_err}")
+
 def call_llm(messages):
     try:
         if GEMINI_KEYS:
