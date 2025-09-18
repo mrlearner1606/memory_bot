@@ -7,40 +7,103 @@ from datetime import datetime
 from flask import Flask, request, render_template_string, redirect, url_for, session, flash
 from dotenv import load_dotenv
 
+
 load_dotenv()
 currdate = datetime.now().strftime("%Y-%m-%d")
+
 
 # --- Config from environment ---
 AIRTABLE_TOKEN = os.environ.get("AIRTABLE_TOKEN")
 AIRTABLE_BASE_ID = os.environ.get("AIRTABLE_BASE_ID")
 AIRTABLE_TABLE_ID = os.environ.get("AIRTABLE_TABLE_ID")
 
-# OpenRouter keys
+
+# Pollinations.AI config (primary AI - like Rajni, the main hero!)
+POLLINATION_API_KEY = os.environ.get("POLLINATION")  # May not be needed, but keeping as requested
+POLLINATION_MODEL = "openai"  # Using the reasoning model like Enthiran's brain!
+
+
+# OpenRouter keys (backup #1)
 OPENROUTER_KEYS = [os.environ[k] for k in os.environ if k.startswith("OPENROUTER_API_KEY_")]
 OPENROUTER_KEYS = [k for k in OPENROUTER_KEYS if k]
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o-mini")
 
-# Gemini keys
+
+# Gemini keys (backup #2)
 GEMINI_KEYS = [os.environ[k] for k in os.environ if k.startswith("GEMINI_API_KEY_")]
 GEMINI_KEYS = [k for k in GEMINI_KEYS if k]
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-1.5-pro")
 
+
 UI_PASSWORD = os.environ.get("UI_PASSWORD")
 FLASK_SECRET = os.environ.get("FLASK_SECRET")
+
 
 if not AIRTABLE_TOKEN or not AIRTABLE_BASE_ID or not AIRTABLE_TABLE_ID:
     raise RuntimeError("Set AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_ID in env")
 
-if not OPENROUTER_KEYS and not GEMINI_KEYS:
-    raise RuntimeError("Provide at least one OPENROUTER_API_KEY_x or GEMINI_API_KEY_x")
+
+# At least one AI service should be available (like having at least one superhero in the team!)
+if not POLLINATION_API_KEY and not OPENROUTER_KEYS and not GEMINI_KEYS:
+    raise RuntimeError("Provide at least POLLINATION or OPENROUTER_API_KEY_x or GEMINI_API_KEY_x")
+
 
 app = Flask(__name__)
 app.secret_key = FLASK_SECRET
+
 
 # global indexes
 openrouter_index = 0
 gemini_index = 0
 session_req = requests.Session()
+
+
+def call_pollinations_llm(messages, timeout=30):
+    """Primary AI service - like Sivaji leading the charge!"""
+    try:
+        # Convert messages to a single prompt for pollinations
+        if len(messages) == 1:
+            prompt = messages[0]["content"]
+        else:
+            # Combine system and user messages
+            prompt_parts = []
+            for msg in messages:
+                if msg.get("role") == "system":
+                    prompt_parts.append(f"System: {msg['content']}")
+                elif msg.get("role") == "user":
+                    prompt_parts.append(f"User: {msg['content']}")
+                else:
+                    prompt_parts.append(msg.get("content", ""))
+            prompt = "\n".join(prompt_parts)
+        
+        # URL encode the prompt
+        import urllib.parse
+        encoded_prompt = urllib.parse.quote(prompt)
+        
+        # Pollinations.AI text endpoint with reasoning model
+        url = f"https://text.pollinations.ai/{encoded_prompt}?model={POLLINATION_MODEL}"
+        
+        # Add API key in headers if provided (though pollinations might not need it)
+        headers = {}
+        if POLLINATION_API_KEY:
+            headers["Authorization"] = f"Bearer {POLLINATION_API_KEY}"
+        
+        resp = session_req.get(url, headers=headers, timeout=timeout)
+        print(f"Pollinations Response Status: {resp.status_code}")  # Debug line
+        print(f"Pollinations Response: {resp.text[:500]}")  # Debug line
+        
+        if resp.status_code == 200:
+            result = resp.text.strip()
+            if result:
+                return result
+            else:
+                raise RuntimeError("Empty response from Pollinations")
+        else:
+            raise RuntimeError(f"Pollinations status {resp.status_code}: {resp.text}")
+            
+    except Exception as e:
+        raise RuntimeError(f"Pollinations failed: {e}")
+
 
 def get_next_openrouter_key():
     global openrouter_index
@@ -50,6 +113,7 @@ def get_next_openrouter_key():
     openrouter_index += 1
     return key
 
+
 def get_next_gemini_key():
     global gemini_index
     if not GEMINI_KEYS:
@@ -57,6 +121,7 @@ def get_next_gemini_key():
     key = GEMINI_KEYS[gemini_index % len(GEMINI_KEYS)]
     gemini_index += 1
     return key
+
 
 def call_openrouter_llm(messages, timeout=20):
     url = "https://openrouter.ai/api/v1/chat/completions"
@@ -82,6 +147,7 @@ def call_openrouter_llm(messages, timeout=20):
             last_err = e
     
     raise RuntimeError(f"All OpenRouter keys failed. Last error: {last_err}")
+
 
 def call_gemini_llm(messages, timeout=30):
     url_template = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
@@ -159,22 +225,46 @@ def call_gemini_llm(messages, timeout=30):
     
     raise RuntimeError(f"All Gemini keys failed. Last error: {last_err}")
 
+
 def call_llm(messages):
-    try:
-        if GEMINI_KEYS:
+    """
+    Try services in order like Batman's contingency plans:
+    1. Pollinations.AI (primary - like Rajni taking charge!)
+    2. Gemini (backup #1 - like Robin stepping in)
+    3. OpenRouter (backup #2 - like Alfred as last resort)
+    """
+    errors = []
+    
+    # Try Pollinations first (main hero!)
+    if POLLINATION_API_KEY or True:  # Pollinations is free, so try even without key
+        try:
+            print("Trying Pollinations.AI first...")
+            return call_pollinations_llm(messages)
+        except Exception as e:
+            print(f"Pollinations failed: {e}")
+            errors.append(f"Pollinations: {e}")
+    
+    # Try Gemini second (backup hero #1)
+    if GEMINI_KEYS:
+        try:
+            print("Fallback to Gemini...")
             return call_gemini_llm(messages)
-        elif OPENROUTER_KEYS:
+        except Exception as e:
+            print(f"Gemini failed: {e}")
+            errors.append(f"Gemini: {e}")
+    
+    # Try OpenRouter last (backup hero #2)
+    if OPENROUTER_KEYS:
+        try:
+            print("Final fallback to OpenRouter...")
             return call_openrouter_llm(messages)
-        else:
-            raise RuntimeError("No API keys configured.")
-    except Exception as e:
-        print(f"Gemini failed: {e}")
-        if OPENROUTER_KEYS:
-            try:
-                return call_openrouter_llm(messages)
-            except Exception as e2:
-                raise RuntimeError(f"Both APIs failed. Gemini: {e}, OpenRouter: {e2}")
-        raise
+        except Exception as e:
+            print(f"OpenRouter failed: {e}")
+            errors.append(f"OpenRouter: {e}")
+    
+    # All failed - like when all superheroes are down!
+    raise RuntimeError(f"All AI services failed! Errors: {'; '.join(errors)}")
+
 
 def classify_intent(query: str) -> str:
     system_prompt = (
@@ -183,6 +273,7 @@ def classify_intent(query: str) -> str:
         "If the input is just one word then it is only QUERY"
     )
     return call_llm([{"role": "system", "content": system_prompt}, {"role": "user", "content": query}]).strip().upper()
+
 
 def extract_insert_fields(query: str) -> dict:
     system_prompt = (
@@ -199,6 +290,7 @@ def extract_insert_fields(query: str) -> dict:
     except Exception:
         return {"Knowledge": query, "Reference": "", "Date": currdate}
 
+
 def insert_airtable(fields: dict) -> dict:
     url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_ID}"
     headers = {"Authorization": f"Bearer {AIRTABLE_TOKEN}", "Content-Type": "application/json"}
@@ -207,12 +299,14 @@ def insert_airtable(fields: dict) -> dict:
     resp.raise_for_status()
     return resp.json()
 
+
 def extract_reference_keywords(query: str) -> list:
     out = call_llm(
         [{"role": "system", "content": "Extract key reference words from the query. Reply comma-separated. If input is one word, just return that word."},
          {"role": "user", "content": query}]
     )
     return [w.strip() for w in out.split(",") if w.strip()]
+
 
 def search_airtable_by_reference(keywords: list) -> list:
     results, seen_ids = [], set()
@@ -229,6 +323,7 @@ def search_airtable_by_reference(keywords: list) -> list:
                 results.append(r)
     return results
 
+
 def llm_answer_using_records(query: str, records: list) -> str:
     context = "\n".join([json.dumps(r.get("fields", {}), ensure_ascii=False) for r in records]) or "No records."
     system_prompt = (
@@ -241,6 +336,7 @@ def llm_answer_using_records(query: str, records: list) -> str:
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": f"User query: {query}\n\nRecords:\n{context}"}
     ])
+
 
 LOGIN_HTML = """
 <!doctype html>
@@ -261,6 +357,7 @@ button { background:#1e88e5; color:white; cursor:pointer; }
   <button type="submit">Sign in</button>
 </form>
 """
+
 
 MAIN_HTML = """
 <!doctype html>
@@ -293,11 +390,13 @@ document.getElementById("queryForm").addEventListener("keydown", function(e) {
 </script>
 """
 
+
 @app.route("/", methods=["GET"])
 def index():
     if not session.get("authed"):
         return render_template_string(LOGIN_HTML)
     return render_template_string(MAIN_HTML, result=None)
+
 
 @app.route("/login", methods=["POST"])
 def login():
@@ -307,10 +406,12 @@ def login():
     flash("Invalid password")
     return redirect(url_for("index"))
 
+
 @app.route("/logout")
 def logout():
     session.clear()
     return redirect(url_for("index"))
+
 
 @app.route("/ask", methods=["POST"])
 def ask():
@@ -336,6 +437,7 @@ def ask():
     except Exception as e:
         print(f"Error in ask route: {e}")  # Debug line
         return render_template_string(MAIN_HTML, result=f"Error: {e}")
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
