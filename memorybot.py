@@ -20,7 +20,7 @@ AIRTABLE_TABLE_ID = os.environ.get("AIRTABLE_TABLE_ID")
 
 # Pollinations.AI config (primary AI - like Rajni, the main hero!)
 POLLINATION_API_KEY = os.environ.get("POLLINATION")  # May not be needed, but keeping as requested
-POLLINATION_MODEL = "openai"  # Using the reasoning model like Enthiran's brain!
+POLLINATION_MODEL = "mirexa"  # Using the reasoning model like Enthiran's brain!
 
 
 # OpenRouter keys (backup #1)
