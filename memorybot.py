@@ -278,7 +278,7 @@ def classify_intent(query: str) -> str:
 def extract_insert_fields(query: str) -> dict:
     system_prompt = (
         "You are an extractor. Given the user's statement, output valid JSON (use double quotes) with keys:\n"
-        f"- Knowledge\n- Reference\n- Date (ISO YYYY-MM-DD or {currdate})\n\n"
+        f"- Knowledge make the user input as first person perspective and exclude the word today from the user input\n- Reference put words that relate to users input, that makes it easier to retrieve\n- Date (ISO YYYY-MM-DD or {currdate} if today is mentioned in user input)\n\n"
         "Return only JSON."
     )
     out = call_llm([{"role": "system", "content": system_prompt}, {"role": "user", "content": query}])
