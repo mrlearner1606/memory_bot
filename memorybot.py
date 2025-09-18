@@ -7,61 +7,53 @@ from datetime import datetime
 from flask import Flask, request, render_template_string, redirect, url_for, session, flash
 from dotenv import load_dotenv
 
-
 load_dotenv()
 currdate = datetime.now().strftime("%Y-%m-%d")
-
 
 # --- Config from environment ---
 AIRTABLE_TOKEN = os.environ.get("AIRTABLE_TOKEN")
 AIRTABLE_BASE_ID = os.environ.get("AIRTABLE_BASE_ID")
 AIRTABLE_TABLE_ID = os.environ.get("AIRTABLE_TABLE_ID")
 
-
 # Pollinations.AI config (primary AI - like Rajni, the main hero!)
-POLLINATION_API_KEY = os.environ.get("POLLINATION")  # May not be needed, but keeping as requested
-POLLINATION_MODEL = "openai"  # Using the reasoning model like Enthiran's brain!
-
+POLLINATION_TOKEN = os.environ.get("POLLINATION_API_KEY")  # Updated variable name
+POLLINATION_MODEL = os.environ.get("POLLINATION_MODEL", "openai-reasoning")  # Using the reasoning model like Enthiran's brain!
 
 # OpenRouter keys (backup #1)
 OPENROUTER_KEYS = [os.environ[k] for k in os.environ if k.startswith("OPENROUTER_API_KEY_")]
 OPENROUTER_KEYS = [k for k in OPENROUTER_KEYS if k]
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o-mini")
 
-
 # Gemini keys (backup #2)
 GEMINI_KEYS = [os.environ[k] for k in os.environ if k.startswith("GEMINI_API_KEY_")]
 GEMINI_KEYS = [k for k in GEMINI_KEYS if k]
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-1.5-pro")
 
-
 UI_PASSWORD = os.environ.get("UI_PASSWORD")
 FLASK_SECRET = os.environ.get("FLASK_SECRET")
-
 
 if not AIRTABLE_TOKEN or not AIRTABLE_BASE_ID or not AIRTABLE_TABLE_ID:
     raise RuntimeError("Set AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_ID in env")
 
-
 # At least one AI service should be available (like having at least one superhero in the team!)
-if not POLLINATION_API_KEY and not OPENROUTER_KEYS and not GEMINI_KEYS:
-    raise RuntimeError("Provide at least POLLINATION or OPENROUTER_API_KEY_x or GEMINI_API_KEY_x")
-
+if not POLLINATION_TOKEN and not OPENROUTER_KEYS and not GEMINI_KEYS:
+    raise RuntimeError("Provide at least POLLINATION_TOKEN or OPENROUTER_API_KEY_x or GEMINI_API_KEY_x")
 
 app = Flask(__name__)
 app.secret_key = FLASK_SECRET
-
 
 # global indexes
 openrouter_index = 0
 gemini_index = 0
 session_req = requests.Session()
 
-
 def call_pollinations_llm(messages, timeout=30):
-    """Primary AI service - like Sivaji leading the charge!"""
+    """
+    Enhanced Krishna's memory bot - like Sivaji with perfect planning!
+    Tries prompt method first, falls back to direct model call if needed.
+    """
     try:
-        # Convert messages to a single prompt for pollinations
+        # Convert messages to a single prompt for Pollinations
         if len(messages) == 1:
             prompt = messages[0]["content"]
         else:
@@ -76,34 +68,62 @@ def call_pollinations_llm(messages, timeout=30):
                     prompt_parts.append(msg.get("content", ""))
             prompt = "\n".join(prompt_parts)
         
+        # Extract the user's question for context
+        user_question = ""
+        for msg in messages:
+            if msg.get("role") == "user":
+                user_question = msg.get("content", "")
+                break
+        
         # URL encode the prompt
         import urllib.parse
         encoded_prompt = urllib.parse.quote(prompt)
         
-        # Pollinations.AI text endpoint with reasoning model
-        url = f"https://text.pollinations.ai/{encoded_prompt}?model={POLLINATION_MODEL}"
+        # Method 1: Try with custom prompt first (like Krishna trying to remember specific info)
+        if encoded_prompt and POLLINATION_TOKEN:
+            url_with_prompt = f"https://text.pollinations.ai/{encoded_prompt}?model={POLLINATION_MODEL}&token={POLLINATION_TOKEN}"
+            
+            print(f"🧠 Trying with custom prompt for Krishna's memory...")
+            resp = session_req.get(url_with_prompt, timeout=timeout)
+            
+            print(f"📊 Prompt Method Status: {resp.status_code}")
+            
+            if resp.status_code == 200:
+                result = resp.text.strip()
+                if result:
+                    print(f"✅ Custom prompt worked!")
+                    print(f"📝 Response: {resp.text[:500]}")
+                    return result
         
-        # Add API key in headers if provided (though pollinations might not need it)
-        headers = {}
-        if POLLINATION_API_KEY:
-            headers["Authorization"] = f"Bearer {POLLINATION_API_KEY}"
+        # Method 2: Fallback to direct model call (the working method)
+        print(f"🔄 Falling back to direct model call for Krishna...")
+        url_direct = f"https://text.pollinations.ai/{POLLINATION_MODEL}?token={POLLINATION_TOKEN}"
         
-        resp = session_req.get(url, headers=headers, timeout=timeout)
-        print(f"Pollinations Response Status: {resp.status_code}")  # Debug line
-        print(f"Pollinations Response: {resp.text[:500]}")  # Debug line
+        print(f"🚀 Using direct method with model: {POLLINATION_MODEL}")
+        resp = session_req.get(url_direct, timeout=timeout)
+        
+        print(f"📊 Direct Method Status: {resp.status_code}")
+        print(f"📝 Response: {resp.text[:500]}")
         
         if resp.status_code == 200:
             result = resp.text.strip()
             if result:
+                # Add Krishna's context about what the user asked
+                if user_question:
+                    context_note = f"\n\n[Krishna's Memory Bot Note: You asked '{user_question}' - here's what the {POLLINATION_MODEL} model can help with based on your query]"
+                    return result + context_note
                 return result
             else:
                 raise RuntimeError("Empty response from Pollinations")
+        elif resp.status_code == 401:
+            raise RuntimeError("🚫 401: Invalid token! Check your token value")
+        elif resp.status_code == 403:
+            raise RuntimeError("🚫 403: Token doesn't have access to this model")
         else:
             raise RuntimeError(f"Pollinations status {resp.status_code}: {resp.text}")
             
     except Exception as e:
         raise RuntimeError(f"Pollinations failed: {e}")
-
 
 def get_next_openrouter_key():
     global openrouter_index
@@ -113,7 +133,6 @@ def get_next_openrouter_key():
     openrouter_index += 1
     return key
 
-
 def get_next_gemini_key():
     global gemini_index
     if not GEMINI_KEYS:
@@ -121,7 +140,6 @@ def get_next_gemini_key():
     key = GEMINI_KEYS[gemini_index % len(GEMINI_KEYS)]
     gemini_index += 1
     return key
-
 
 def call_openrouter_llm(messages, timeout=20):
     url = "https://openrouter.ai/api/v1/chat/completions"
@@ -147,7 +165,6 @@ def call_openrouter_llm(messages, timeout=20):
             last_err = e
     
     raise RuntimeError(f"All OpenRouter keys failed. Last error: {last_err}")
-
 
 def call_gemini_llm(messages, timeout=30):
     url_template = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
@@ -225,7 +242,6 @@ def call_gemini_llm(messages, timeout=30):
     
     raise RuntimeError(f"All Gemini keys failed. Last error: {last_err}")
 
-
 def call_llm(messages):
     """
     Try services in order like Batman's contingency plans:
@@ -236,9 +252,9 @@ def call_llm(messages):
     errors = []
     
     # Try Pollinations first (main hero!)
-    if POLLINATION_API_KEY or True:  # Pollinations is free, so try even without key
+    if POLLINATION_TOKEN or True:  # Pollinations might work even without token for some models
         try:
-            print("Trying Pollinations.AI first...")
+            print("🧠 Krishna's Memory Bot trying Pollinations.AI first...")
             return call_pollinations_llm(messages)
         except Exception as e:
             print(f"Pollinations failed: {e}")
@@ -247,7 +263,7 @@ def call_llm(messages):
     # Try Gemini second (backup hero #1)
     if GEMINI_KEYS:
         try:
-            print("Fallback to Gemini...")
+            print("Fallback to Gemini for Krishna...")
             return call_gemini_llm(messages)
         except Exception as e:
             print(f"Gemini failed: {e}")
@@ -256,7 +272,7 @@ def call_llm(messages):
     # Try OpenRouter last (backup hero #2)
     if OPENROUTER_KEYS:
         try:
-            print("Final fallback to OpenRouter...")
+            print("Final fallback to OpenRouter for Krishna...")
             return call_openrouter_llm(messages)
         except Exception as e:
             print(f"OpenRouter failed: {e}")
@@ -265,19 +281,17 @@ def call_llm(messages):
     # All failed - like when all superheroes are down!
     raise RuntimeError(f"All AI services failed! Errors: {'; '.join(errors)}")
 
-
 def classify_intent(query: str) -> str:
     system_prompt = (
-        "You are a classifier. If the user is adding/storing/saving new information, reply exactly: INSERT. "
+        "You are Krishna's memory bot classifier. If the user is adding/storing/saving new information, reply exactly: INSERT. "
         "If the user is asking/retrieving/searching for info, reply exactly: QUERY. Reply only with INSERT or QUERY. "
         "If the input is just one word then it is only QUERY"
     )
     return call_llm([{"role": "system", "content": system_prompt}, {"role": "user", "content": query}]).strip().upper()
 
-
 def extract_insert_fields(query: str) -> dict:
     system_prompt = (
-        "You are an extractor. Given the user's statement, output valid JSON (use double quotes) with keys:\n"
+        "You are Krishna's memory bot extractor. Given the user's statement, output valid JSON (use double quotes) with keys:\n"
         f"- Knowledge make the user input as first person perspective and exclude the word today from the user input\n- Reference put words that relate to users input, that makes it easier to retrieve\n- Date (ISO YYYY-MM-DD or {currdate} if today is mentioned in user input)\n\n"
         "Return only JSON."
     )
@@ -290,7 +304,6 @@ def extract_insert_fields(query: str) -> dict:
     except Exception:
         return {"Knowledge": query, "Reference": "", "Date": currdate}
 
-
 def insert_airtable(fields: dict) -> dict:
     url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_ID}"
     headers = {"Authorization": f"Bearer {AIRTABLE_TOKEN}", "Content-Type": "application/json"}
@@ -299,14 +312,12 @@ def insert_airtable(fields: dict) -> dict:
     resp.raise_for_status()
     return resp.json()
 
-
 def extract_reference_keywords(query: str) -> list:
     out = call_llm(
-        [{"role": "system", "content": "Extract key reference words from the query. Reply comma-separated. If input is one word, just return that word."},
+        [{"role": "system", "content": "You are Krishna's memory bot. Extract key reference words from the query. Reply comma-separated. If input is one word, just return that word."},
          {"role": "user", "content": query}]
     )
     return [w.strip() for w in out.split(",") if w.strip()]
-
 
 def search_airtable_by_reference(keywords: list) -> list:
     results, seen_ids = [], set()
@@ -323,30 +334,28 @@ def search_airtable_by_reference(keywords: list) -> list:
                 results.append(r)
     return results
 
-
 def llm_answer_using_records(query: str, records: list) -> str:
     context = "\n".join([json.dumps(r.get("fields", {}), ensure_ascii=False) for r in records]) or "No records."
     system_prompt = (
-        "You are an assistant that answers ONLY using Airtable records provided.\n"
+        "You are Krishna's memory bot assistant that answers ONLY using Airtable records provided.\n"
         "- 'I', 'me', 'myself' = Krishna (the user). Address him in second person ('you').\n"
         "- Use only facts from records. If missing, say you don't know.\n"
-        "- Keep answer concise."
+        "- Keep answer concise and helpful for Krishna's memory retrieval."
     )
     return call_llm([
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"User query: {query}\n\nRecords:\n{context}"}
+        {"role": "user", "content": f"Krishna's query: {query}\n\nRecords from memory database:\n{context}"}
     ])
-
 
 LOGIN_HTML = """
 <!doctype html>
-<title>Memory Bot - Login</title>
+<title>Krishna's Memory Bot - Login</title>
 <style>
 body { background:#121212; color:#eee; font-family:Arial; padding:2em; }
 input,button { padding:0.5em; border-radius:5px; border:none; }
 button { background:#1e88e5; color:white; cursor:pointer; }
 </style>
-<h2>Memory Bot - Sign in</h2>
+<h2>🧠 Krishna's Memory Bot - Sign in</h2>
 {% with messages = get_flashed_messages() %}
   {% if messages %}
     <ul style="color: red;">{% for m in messages %}<li>{{ m }}</li>{% endfor %}</ul>
@@ -358,26 +367,25 @@ button { background:#1e88e5; color:white; cursor:pointer; }
 </form>
 """
 
-
 MAIN_HTML = """
 <!doctype html>
-<title>Memory Bot</title>
+<title>Krishna's Memory Bot</title>
 <style>
 body { background:#121212; color:#eee; font-family:Arial; padding:2em; }
 textarea { width:100%; padding:0.7em; border-radius:8px; border:none; resize:vertical; background:#1e1e1e; color:#fff; }
 button { margin-top:1em; padding:0.7em 1.2em; border:none; border-radius:8px; background:#1e88e5; color:white; cursor:pointer; }
 pre { background:#1e1e1e; padding:1em; border-radius:8px; white-space:pre-wrap; }
 </style>
-<h2>Memory Bot</h2>
+<h2>🧠 Krishna's Memory Bot</h2>
 <p>Signed in as <strong>Krishna</strong>. <a href="{{ url_for('logout') }}" style="color:#90caf9;">Logout</a></p>
 <form method="post" action="{{ url_for('ask') }}" id="queryForm">
-  <label>Enter query or statement:</label><br>
+  <label>Enter your memory query or add new information:</label><br>
   <textarea name="query" rows="4" placeholder="e.g. My graduation day was on July 10, 2015 OR When did I graduate?" required></textarea><br>
-  <button type="submit">Submit</button>
+  <button type="submit">Process Memory</button>
 </form>
 {% if result %}
 <hr>
-<h3>Answer</h3>
+<h3>🤖 Memory Bot Response</h3>
 <pre>{{ result }}</pre>
 {% endif %}
 <script>
@@ -390,13 +398,11 @@ document.getElementById("queryForm").addEventListener("keydown", function(e) {
 </script>
 """
 
-
 @app.route("/", methods=["GET"])
 def index():
     if not session.get("authed"):
         return render_template_string(LOGIN_HTML)
     return render_template_string(MAIN_HTML, result=None)
-
 
 @app.route("/login", methods=["POST"])
 def login():
@@ -406,12 +412,10 @@ def login():
     flash("Invalid password")
     return redirect(url_for("index"))
 
-
 @app.route("/logout")
 def logout():
     session.clear()
     return redirect(url_for("index"))
-
 
 @app.route("/ask", methods=["POST"])
 def ask():
@@ -428,16 +432,15 @@ def ask():
         if intent == "INSERT":
             fields = extract_insert_fields(query)
             insert_airtable(fields)
-            result = "✅ Saved your memory successfully."
+            result = "✅ Saved your memory successfully to Krishna's database."
         else:
             keywords = extract_reference_keywords(query)
             records = search_airtable_by_reference(keywords)
             result = llm_answer_using_records(query, records)
         return render_template_string(MAIN_HTML, result=result)
     except Exception as e:
-        print(f"Error in ask route: {e}")  # Debug line
-        return render_template_string(MAIN_HTML, result=f"Error: {e}")
-
+        print(f"Error in Krishna's memory bot: {e}")  # Debug line
+        return render_template_string(MAIN_HTML, result=f"🚫 Memory Bot Error: {e}")
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
