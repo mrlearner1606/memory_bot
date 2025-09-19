@@ -3,60 +3,70 @@ import ast
 import json
 import time
 import requests
+import markdown
 from datetime import datetime
-from flask import Flask, request, render_template_string, redirect, url_for, session, flash
+from flask import Flask, request, render_template_string, redirect, url_for, session, flash, Markup
 from dotenv import load_dotenv
-
 
 load_dotenv()
 currdate = datetime.now().strftime("%Y-%m-%d")
-
 
 # --- Config from environment ---
 AIRTABLE_TOKEN = os.environ.get("AIRTABLE_TOKEN")
 AIRTABLE_BASE_ID = os.environ.get("AIRTABLE_BASE_ID")
 AIRTABLE_TABLE_ID = os.environ.get("AIRTABLE_TABLE_ID")
 
-
 # Pollinations.AI config (primary AI - like Rajni, the main hero!)
 POLLINATION_API_KEY = os.environ.get("POLLINATION")  # May not be needed, but keeping as requested
 POLLINATION_MODEL = "mirexa"  # Using the reasoning model like Enthiran's brain!
-
 
 # OpenRouter keys (backup #1)
 OPENROUTER_KEYS = [os.environ[k] for k in os.environ if k.startswith("OPENROUTER_API_KEY_")]
 OPENROUTER_KEYS = [k for k in OPENROUTER_KEYS if k]
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o-mini")
 
-
 # Gemini keys (backup #2)
 GEMINI_KEYS = [os.environ[k] for k in os.environ if k.startswith("GEMINI_API_KEY_")]
 GEMINI_KEYS = [k for k in GEMINI_KEYS if k]
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-1.5-pro")
 
-
 UI_PASSWORD = os.environ.get("UI_PASSWORD")
 FLASK_SECRET = os.environ.get("FLASK_SECRET")
 
-
 if not AIRTABLE_TOKEN or not AIRTABLE_BASE_ID or not AIRTABLE_TABLE_ID:
     raise RuntimeError("Set AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_ID in env")
-
 
 # At least one AI service should be available (like having at least one superhero in the team!)
 if not POLLINATION_API_KEY and not OPENROUTER_KEYS and not GEMINI_KEYS:
     raise RuntimeError("Provide at least POLLINATION or OPENROUTER_API_KEY_x or GEMINI_API_KEY_x")
 
-
 app = Flask(__name__)
 app.secret_key = FLASK_SECRET
 
+# Initialize markdown with extensions - like giving Batman more gadgets!
+md = markdown.Markdown(extensions=[
+    'markdown.extensions.extra',      # Tables, footnotes, etc.
+    'markdown.extensions.codehilite', # Code syntax highlighting
+    'markdown.extensions.toc',        # Table of contents
+    'markdown.extensions.nl2br',      # New line to break
+    'markdown.extensions.fenced_code' # Fenced code blocks
+], extension_configs={
+    'codehilite': {
+        'css_class': 'highlight',
+        'use_pygments': False
+    }
+})
+
+# Custom markdown filter - like Sivaji's special skills!
+def markdown_filter(text):
+    return Markup(md.convert(text))
+
+app.jinja_env.filters['markdown'] = markdown_filter
 
 # global indexes
 openrouter_index = 0
 gemini_index = 0
 session_req = requests.Session()
-
 
 def call_pollinations_llm(messages, timeout=30):
     """Primary AI service - like Sivaji leading the charge!"""
@@ -104,7 +114,6 @@ def call_pollinations_llm(messages, timeout=30):
     except Exception as e:
         raise RuntimeError(f"Pollinations failed: {e}")
 
-
 def get_next_openrouter_key():
     global openrouter_index
     if not OPENROUTER_KEYS:
@@ -113,7 +122,6 @@ def get_next_openrouter_key():
     openrouter_index += 1
     return key
 
-
 def get_next_gemini_key():
     global gemini_index
     if not GEMINI_KEYS:
@@ -121,7 +129,6 @@ def get_next_gemini_key():
     key = GEMINI_KEYS[gemini_index % len(GEMINI_KEYS)]
     gemini_index += 1
     return key
-
 
 def call_openrouter_llm(messages, timeout=20):
     url = "https://openrouter.ai/api/v1/chat/completions"
@@ -147,7 +154,6 @@ def call_openrouter_llm(messages, timeout=20):
             last_err = e
     
     raise RuntimeError(f"All OpenRouter keys failed. Last error: {last_err}")
-
 
 def call_gemini_llm(messages, timeout=30):
     url_template = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
@@ -225,7 +231,6 @@ def call_gemini_llm(messages, timeout=30):
     
     raise RuntimeError(f"All Gemini keys failed. Last error: {last_err}")
 
-
 def call_llm(messages):
     """
     Try services in order like Batman's contingency plans:
@@ -265,7 +270,6 @@ def call_llm(messages):
     # All failed - like when all superheroes are down!
     raise RuntimeError(f"All AI services failed! Errors: {'; '.join(errors)}")
 
-
 def classify_intent(query: str) -> str:
     system_prompt = (
         "You are a classifier. If the user is adding/storing/saving new information, reply exactly: INSERT. "
@@ -273,7 +277,6 @@ def classify_intent(query: str) -> str:
         "If the input is just one word then it is only QUERY"
     )
     return call_llm([{"role": "system", "content": system_prompt}, {"role": "user", "content": query}]).strip().upper()
-
 
 def extract_insert_fields(query: str) -> dict:
     system_prompt = (
@@ -290,7 +293,6 @@ def extract_insert_fields(query: str) -> dict:
     except Exception:
         return {"Knowledge": query, "Reference": "", "Date": currdate}
 
-
 def insert_airtable(fields: dict) -> dict:
     url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_ID}"
     headers = {"Authorization": f"Bearer {AIRTABLE_TOKEN}", "Content-Type": "application/json"}
@@ -299,14 +301,12 @@ def insert_airtable(fields: dict) -> dict:
     resp.raise_for_status()
     return resp.json()
 
-
 def extract_reference_keywords(query: str) -> list:
     out = call_llm(
         [{"role": "system", "content": "Extract key reference words from the query. Reply comma-separated. If input is one word, just return that word."},
          {"role": "user", "content": query}]
     )
     return [w.strip() for w in out.split(",") if w.strip()]
-
 
 def search_airtable_by_reference(keywords: list) -> list:
     results, seen_ids = [], set()
@@ -323,80 +323,403 @@ def search_airtable_by_reference(keywords: list) -> list:
                 results.append(r)
     return results
 
-
 def llm_answer_using_records(query: str, records: list) -> str:
     context = "\n".join([json.dumps(r.get("fields", {}), ensure_ascii=False) for r in records]) or "No records."
     system_prompt = (
         "You are an assistant that answers ONLY using Airtable records provided.\n"
         "- 'I', 'me', 'myself' = Krishna (the user). Address him in second person ('you').\n"
         "- Use only facts from records. If missing, say you don't know.\n"
-        "- Keep answer concise."
+        "- Format your response using Markdown syntax for better readability.\n"
+        "- Use headers (##), bullet points (-), **bold text**, *italic text* where appropriate.\n"
+        "- Keep answer concise but well-formatted."
     )
     return call_llm([
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": f"User query: {query}\n\nRecords:\n{context}"}
     ])
 
-
 LOGIN_HTML = """
 <!doctype html>
-<title>Memory Bot - Login</title>
-<style>
-body { background:#121212; color:#eee; font-family:Arial; padding:2em; }
-input,button { padding:0.5em; border-radius:5px; border:none; }
-button { background:#1e88e5; color:white; cursor:pointer; }
-</style>
-<h2>Memory Bot - Sign in</h2>
-{% with messages = get_flashed_messages() %}
-  {% if messages %}
-    <ul style="color: red;">{% for m in messages %}<li>{{ m }}</li>{% endfor %}</ul>
-  {% endif %}
-{% endwith %}
-<form method="post" action="{{ url_for('login') }}">
-  <input type="password" name="password" placeholder="Password" autofocus required>
-  <button type="submit">Sign in</button>
-</form>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Memory Bot - Login</title>
+    <style>
+        body { 
+            background: linear-gradient(135deg, #121212, #1e1e1e); 
+            color: #eee; 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            padding: 2em; 
+            margin: 0;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .login-container {
+            background: rgba(30, 30, 30, 0.8);
+            padding: 2em;
+            border-radius: 15px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+            backdrop-filter: blur(10px);
+            max-width: 400px;
+            width: 100%;
+        }
+        input, button { 
+            padding: 0.8em; 
+            border-radius: 8px; 
+            border: none; 
+            width: 100%;
+            margin: 0.5em 0;
+            box-sizing: border-box;
+        }
+        input {
+            background: #2a2a2a;
+            color: #fff;
+        }
+        button { 
+            background: linear-gradient(135deg, #1e88e5, #1976d2); 
+            color: white; 
+            cursor: pointer; 
+            font-weight: bold;
+            transition: all 0.3s ease;
+        }
+        button:hover {
+            background: linear-gradient(135deg, #1976d2, #1565c0);
+            transform: translateY(-2px);
+        }
+        h2 {
+            text-align: center;
+            margin-bottom: 1.5em;
+            color: #1e88e5;
+        }
+        .error {
+            color: #f44336;
+            background: rgba(244, 67, 54, 0.1);
+            padding: 0.5em;
+            border-radius: 5px;
+            margin: 1em 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-container">
+        <h2>🧠 Memory Bot - Sign in</h2>
+        {% with messages = get_flashed_messages() %}
+          {% if messages %}
+            <div class="error">
+                {% for m in messages %}<div>{{ m }}</div>{% endfor %}
+            </div>
+          {% endif %}
+        {% endwith %}
+        <form method="post" action="{{ url_for('login') }}">
+          <input type="password" name="password" placeholder="Enter Password" autofocus required>
+          <button type="submit">🚀 Sign in</button>
+        </form>
+    </div>
+</body>
+</html>
 """
-
 
 MAIN_HTML = """
 <!doctype html>
-<title>Memory Bot</title>
-<style>
-body { background:#121212; color:#eee; font-family:Arial; padding:2em; }
-textarea { width:100%; padding:0.7em; border-radius:8px; border:none; resize:vertical; background:#1e1e1e; color:#fff; }
-button { margin-top:1em; padding:0.7em 1.2em; border:none; border-radius:8px; background:#1e88e5; color:white; cursor:pointer; }
-pre { background:#1e1e1e; padding:1em; border-radius:8px; white-space:pre-wrap; }
-</style>
-<h2>Memory Bot</h2>
-<p>Signed in as <strong>Krishna</strong>. <a href="{{ url_for('logout') }}" style="color:#90caf9;">Logout</a></p>
-<form method="post" action="{{ url_for('ask') }}" id="queryForm">
-  <label>Enter query or statement:</label><br>
-  <textarea name="query" rows="4" placeholder="e.g. My graduation day was on July 10, 2015 OR When did I graduate?" required></textarea><br>
-  <button type="submit">Submit</button>
-</form>
-{% if result %}
-<hr>
-<h3>Answer</h3>
-<pre>{{ result }}</pre>
-{% endif %}
-<script>
-document.getElementById("queryForm").addEventListener("keydown", function(e) {
-  if (e.key === "Enter" && !e.shiftKey) {
-    e.preventDefault();
-    this.submit();
-  }
-});
-</script>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Memory Bot</title>
+    <style>
+        body { 
+            background: linear-gradient(135deg, #121212, #1e1e1e); 
+            color: #eee; 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            padding: 2em; 
+            margin: 0;
+            min-height: 100vh;
+            line-height: 1.6;
+        }
+        
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+        
+        .header {
+            text-align: center;
+            margin-bottom: 2em;
+            padding: 1em;
+            background: rgba(30, 30, 30, 0.5);
+            border-radius: 15px;
+        }
+        
+        .header h2 {
+            color: #1e88e5;
+            margin: 0;
+        }
+        
+        .user-info {
+            margin-top: 0.5em;
+            color: #aaa;
+        }
+        
+        .user-info a {
+            color: #90caf9;
+            text-decoration: none;
+        }
+        
+        .user-info a:hover {
+            text-decoration: underline;
+        }
+        
+        .query-section {
+            background: rgba(30, 30, 30, 0.8);
+            padding: 2em;
+            border-radius: 15px;
+            margin-bottom: 2em;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        }
+        
+        textarea { 
+            width: 100%; 
+            padding: 1em; 
+            border-radius: 10px; 
+            border: 2px solid #333; 
+            resize: vertical; 
+            background: #2a2a2a; 
+            color: #fff; 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-size: 14px;
+            box-sizing: border-box;
+            transition: border-color 0.3s ease;
+        }
+        
+        textarea:focus {
+            border-color: #1e88e5;
+            outline: none;
+        }
+        
+        button { 
+            margin-top: 1em; 
+            padding: 1em 2em; 
+            border: none; 
+            border-radius: 10px; 
+            background: linear-gradient(135deg, #1e88e5, #1976d2); 
+            color: white; 
+            cursor: pointer; 
+            font-weight: bold;
+            font-size: 16px;
+            transition: all 0.3s ease;
+        }
+        
+        button:hover {
+            background: linear-gradient(135deg, #1976d2, #1565c0);
+            transform: translateY(-2px);
+            box-shadow: 0 4px 15px rgba(30, 136, 229, 0.3);
+        }
+        
+        .result-section {
+            background: rgba(30, 30, 30, 0.8);
+            padding: 2em;
+            border-radius: 15px;
+            margin-top: 2em;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        }
+        
+        .result-section h3 {
+            color: #1e88e5;
+            margin-top: 0;
+            border-bottom: 2px solid #333;
+            padding-bottom: 0.5em;
+        }
+        
+        /* Markdown Styling - like Tony Stark's HUD! */
+        .markdown-content {
+            background: #1a1a1a;
+            padding: 1.5em;
+            border-radius: 10px;
+            border: 1px solid #333;
+            color: #eee;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        
+        .markdown-content h1, .markdown-content h2, .markdown-content h3, 
+        .markdown-content h4, .markdown-content h5, .markdown-content h6 {
+            color: #1e88e5;
+            margin-top: 1.5em;
+            margin-bottom: 0.5em;
+        }
+        
+        .markdown-content h1 { font-size: 2em; border-bottom: 2px solid #1e88e5; padding-bottom: 0.3em; }
+        .markdown-content h2 { font-size: 1.5em; border-bottom: 1px solid #666; padding-bottom: 0.2em; }
+        .markdown-content h3 { font-size: 1.3em; }
+        
+        .markdown-content p {
+            margin: 1em 0;
+            line-height: 1.7;
+        }
+        
+        .markdown-content ul, .markdown-content ol {
+            margin: 1em 0;
+            padding-left: 2em;
+        }
+        
+        .markdown-content li {
+            margin: 0.5em 0;
+        }
+        
+        .markdown-content strong {
+            color: #ffeb3b;
+            font-weight: bold;
+        }
+        
+        .markdown-content em {
+            color: #81c784;
+            font-style: italic;
+        }
+        
+        .markdown-content code {
+            background: #2a2a2a;
+            color: #f8f8f2;
+            padding: 0.2em 0.4em;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+        }
+        
+        .markdown-content pre {
+            background: #2a2a2a;
+            color: #f8f8f2;
+            padding: 1em;
+            border-radius: 8px;
+            overflow-x: auto;
+            border: 1px solid #444;
+        }
+        
+        .markdown-content pre code {
+            background: none;
+            padding: 0;
+        }
+        
+        .markdown-content blockquote {
+            border-left: 4px solid #1e88e5;
+            margin: 1em 0;
+            padding-left: 1em;
+            color: #ccc;
+            font-style: italic;
+        }
+        
+        .markdown-content table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1em 0;
+            background: #2a2a2a;
+        }
+        
+        .markdown-content table th, .markdown-content table td {
+            border: 1px solid #444;
+            padding: 0.8em;
+            text-align: left;
+        }
+        
+        .markdown-content table th {
+            background: #1e88e5;
+            color: white;
+            font-weight: bold;
+        }
+        
+        .markdown-content table tr:nth-child(even) {
+            background: #333;
+        }
+        
+        .markdown-content a {
+            color: #90caf9;
+            text-decoration: none;
+        }
+        
+        .markdown-content a:hover {
+            text-decoration: underline;
+        }
+        
+        .markdown-content hr {
+            border: none;
+            height: 2px;
+            background: linear-gradient(to right, transparent, #1e88e5, transparent);
+            margin: 2em 0;
+        }
+        
+        /* Success message styling */
+        .success-message {
+            color: #4caf50;
+            background: rgba(76, 175, 80, 0.1);
+            padding: 1em;
+            border-radius: 8px;
+            border-left: 4px solid #4caf50;
+        }
+        
+        /* Responsive design */
+        @media (max-width: 768px) {
+            body {
+                padding: 1em;
+            }
+            
+            .query-section, .result-section {
+                padding: 1.5em;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h2>🧠 Memory Bot</h2>
+            <div class="user-info">
+                Signed in as <strong>Krishna</strong> | 
+                <a href="{{ url_for('logout') }}">🚪 Logout</a>
+            </div>
+        </div>
+        
+        <div class="query-section">
+            <form method="post" action="{{ url_for('ask') }}" id="queryForm">
+                <label><strong>Enter your query or statement:</strong></label><br><br>
+                <textarea name="query" rows="5" placeholder="e.g., My graduation day was on July 10, 2015 OR When did I graduate?" required></textarea><br>
+                <button type="submit">🚀 Submit</button>
+            </form>
+        </div>
+        
+        {% if result %}
+        <div class="result-section">
+            <h3>📝 Answer</h3>
+            <div class="markdown-content">
+                {{ result|markdown }}
+            </div>
+        </div>
+        {% endif %}
+    </div>
+    
+    <script>
+        document.getElementById("queryForm").addEventListener("keydown", function(e) {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            this.submit();
+          }
+        });
+        
+        // Auto-resize textarea like Jarvis expanding interface
+        const textarea = document.querySelector('textarea');
+        textarea.addEventListener('input', function() {
+            this.style.height = 'auto';
+            this.style.height = this.scrollHeight + 'px';
+        });
+    </script>
+</body>
+</html>
 """
-
 
 @app.route("/", methods=["GET"])
 def index():
     if not session.get("authed"):
         return render_template_string(LOGIN_HTML)
     return render_template_string(MAIN_HTML, result=None)
-
 
 @app.route("/login", methods=["POST"])
 def login():
@@ -406,12 +729,10 @@ def login():
     flash("Invalid password")
     return redirect(url_for("index"))
 
-
 @app.route("/logout")
 def logout():
     session.clear()
     return redirect(url_for("index"))
-
 
 @app.route("/ask", methods=["POST"])
 def ask():
@@ -428,7 +749,7 @@ def ask():
         if intent == "INSERT":
             fields = extract_insert_fields(query)
             insert_airtable(fields)
-            result = "✅ Saved your memory successfully."
+            result = "✅ **Memory saved successfully!**\n\nYour information has been stored like Jarvis filing away Tony Stark's data."
         else:
             keywords = extract_reference_keywords(query)
             records = search_airtable_by_reference(keywords)
@@ -436,8 +757,8 @@ def ask():
         return render_template_string(MAIN_HTML, result=result)
     except Exception as e:
         print(f"Error in ask route: {e}")  # Debug line
-        return render_template_string(MAIN_HTML, result=f"Error: {e}")
-
+        error_result = f"❌ **Error occurred:**\n\n``````\n\nLike when Enthiran faces a system malfunction!"
+        return render_template_string(MAIN_HTML, result=error_result)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
