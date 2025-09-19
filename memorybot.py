@@ -5,7 +5,8 @@ import time
 import requests
 import markdown
 from datetime import datetime
-from flask import Flask, request, render_template_string, redirect, url_for, session, flash, Markup
+from flask import Flask, request, render_template_string, redirect, url_for, session, flash
+from markupsafe import Markup  # Changed from flask import to markupsafe import!
 from dotenv import load_dotenv
 
 load_dotenv()
