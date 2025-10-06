@@ -8,6 +8,8 @@ from datetime import datetime
 from flask import Flask, request, render_template_string, redirect, url_for, session, flash, jsonify
 from markupsafe import Markup  # Changed from flask import to markupsafe import!
 from dotenv import load_dotenv
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 
 load_dotenv()
@@ -79,11 +81,22 @@ app.jinja_env.filters['markdown'] = markdown_filter
 # global indexes
 openrouter_index = 0
 gemini_index = 0
+
+# Reusable session with retries and bigger pools
 session_req = requests.Session()
+retry_strategy = Retry(
+    total=3,
+    backoff_factor=1.0,
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=["GET", "POST"]
+)
+adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=100, pool_maxsize=100)
+session_req.mount("https://", adapter)
+session_req.mount("http://", adapter)
 
 
-def call_pollinations_llm(messages, timeout=60):
-    """Primary AI service"""
+def call_pollinations_llm(messages, timeout=180):
+    """Primary AI service with long timeout and token query param support"""
     try:
         # Convert messages to a single prompt for pollinations
         if len(messages) == 1:
@@ -102,12 +115,12 @@ def call_pollinations_llm(messages, timeout=60):
         import urllib.parse
         encoded_prompt = urllib.parse.quote(prompt)
 
+        # Prefer token as query param (some gateways expect this)
         url = f"https://text.pollinations.ai/{encoded_prompt}?model={POLLINATION_MODEL}"
+        if POLLINATION_API_KEY:
+            url += f"&token={POLLINATION_API_KEY}"
 
         headers = {}
-        if POLLINATION_API_KEY:
-            headers["Authorization"] = f"Bearer {POLLINATION_API_KEY}"
-
         resp = session_req.get(url, headers=headers, timeout=timeout)
         if resp.status_code == 200:
             result = resp.text.strip()
@@ -140,7 +153,7 @@ def get_next_gemini_key():
     return key
 
 
-def call_openrouter_llm(messages, timeout=40):
+def call_openrouter_llm(messages, timeout=120):
     url = "https://openrouter.ai/api/v1/chat/completions"
     last_err = None
 
@@ -166,7 +179,7 @@ def call_openrouter_llm(messages, timeout=40):
     raise RuntimeError(f"All OpenRouter keys failed. Last error: {last_err}")
 
 
-def call_gemini_llm(messages, timeout=60):
+def call_gemini_llm(messages, timeout=120):
     url_template = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     last_err = None
 
@@ -299,7 +312,7 @@ def insert_airtable(fields: dict) -> dict:
     url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_ID}"
     headers = {"Authorization": f"Bearer {AIRTABLE_TOKEN}", "Content-Type": "application/json"}
     payload = {"records": [{"fields": fields}]}
-    resp = session_req.post(url, headers=headers, json=payload)
+    resp = session_req.post(url, headers=headers, json=payload, timeout=60)
     resp.raise_for_status()
     return resp.json()
 
@@ -319,7 +332,7 @@ def search_airtable_by_reference(keywords: list) -> list:
 
     for kw in keywords:
         formula = f"FIND('{kw.lower()}', LOWER({{Reference}}))"
-        resp = session_req.get(base_url, headers=headers, params={"filterByFormula": formula})
+        resp = session_req.get(base_url, headers=headers, params={"filterByFormula": formula}, timeout=60)
         resp.raise_for_status()
         for r in resp.json().get("records", []):
             if r["id"] not in seen_ids:
@@ -429,7 +442,7 @@ LOGIN_HTML = """
 """
 
 
-# New static, non-reloading UI like the sample, using fetch to send/receive JSON
+# Static, non-reloading UI using fetch with retries and cookie credentials
 MAIN_HTML = """
 <!doctype html>
 <html lang="en">
@@ -535,7 +548,43 @@ function addMessage(role, text, isLoading=false) {
     }
     chatbox.appendChild(div);
     div.scrollIntoView({behavior: "smooth", block: "start"});
-    return div; // return the element to allow removal if loading
+    return div;
+}
+
+function sleep(ms){ return new Promise(res => setTimeout(res, ms)); }
+
+async function fetchWithRetry(url, options, retries=2) {
+    let attempt = 0;
+    let lastError = null;
+    while (attempt <= retries) {
+        try {
+            const resp = await fetch(url, options);
+            // Try to parse JSON; if it fails, throw to trigger retry/catch
+            const ct = resp.headers.get("content-type") || "";
+            if (!ct.includes("application/json")) {
+                const text = await resp.text();
+                // If non-JSON but OK, return as reply text
+                if (resp.ok) return { ok: true, json: { reply: text } };
+                throw new Error("Non-JSON response: " + text);
+            }
+            const json = await resp.json();
+            if (!resp.ok) {
+                // Retry on transient 5xx
+                if (resp.status >= 500 && resp.status < 600) {
+                    throw new Error("Server error " + resp.status);
+                }
+                return { ok: false, json };
+            }
+            return { ok: true, json };
+        } catch (e) {
+            lastError = e;
+            attempt++;
+            if (attempt > retries) break;
+            // Exponential backoff: 1s, 2s
+            await sleep(1000 * attempt);
+        }
+    }
+    throw lastError || new Error("Unknown network error");
 }
 
 async function sendMessage() {
@@ -544,29 +593,38 @@ async function sendMessage() {
     const message = textarea.value.trim();
     if (!message) return;
 
-    // User bubble
     addMessage("user", message);
     textarea.value = "";
     textarea.style.height = "auto";
 
-    // Loading bubble
     btn.disabled = true;
     const loader = addMessage("bot", "Thinking…", true);
 
-    try {
-        const response = await fetch("{{ url_for('ask') }}", {
-            method: "POST",
-            headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({query: message})
-        });
+    // Periodically nudge the user that it's still working for long responses
+    let dotTimer = setInterval(() => {
+        if (loader) loader.textContent += ".";
+    }, 3000);
 
-        const data = await response.json();
-        // Replace loader with actual reply
+    try {
+        const res = await fetchWithRetry("{{ url_for('ask') }}", {
+            method: "POST",
+            headers: {"Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest"},
+            credentials: "same-origin",
+            body: JSON.stringify({query: message})
+        }, 2);
+
         loader.remove();
-        addMessage("bot", data.reply || "❌ Error: Empty reply");
+        clearInterval(dotTimer);
+
+        if (res.ok) {
+            addMessage("bot", res.json.reply || "✅ Done.");
+        } else {
+            addMessage("bot", res.json.reply || "⚠️ Request failed.");
+        }
     } catch (e) {
         loader.remove();
-        addMessage("bot", "❌ Error contacting server. Please try again.");
+        clearInterval(dotTimer);
+        addMessage("bot", "❌ Error contacting server. Still waiting can help if the model is slow. Please try again.");
     } finally {
         btn.disabled = false;
     }
@@ -618,7 +676,7 @@ def logout():
     return redirect(url_for("index"))
 
 
-# Updated ask route: accepts JSON and returns JSON (no page reload)
+# JSON in/out; long-running friendly
 @app.route("/ask", methods=["POST"])
 def ask():
     if not session.get("authed"):
@@ -655,5 +713,5 @@ def ask():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    # Use threaded to keep UI responsive during long calls
-    app.run(host="0.0.0.0", port=port, debug=True, threaded=True)
+    # threaded=True to keep UI responsive; use_reloader=False to avoid first-request reload hiccup
+    app.run(host="0.0.0.0", port=port, debug=True, threaded=True, use_reloader=False)
