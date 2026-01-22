@@ -73,16 +73,16 @@ session_req.mount("http://", adapter)
 def call_llm(prompt_text, timeout=180):
     """Single AI service using Pollinations.AI"""
     try:
-        import urllib.parse
-        encoded_prompt = urllib.parse.quote(prompt_text)
-
-        url = f"https://gen.pollinations.ai/text/{encoded_prompt}?model={POLLINATION_MODEL}"
-        if POLLINATION_API_KEY:
-            url += f"&key={POLLINATION_API_KEY}"
+        url = f"https://gen.pollinations.ai/text/{prompt_text}"
         
-        headers = {}
+        params = {
+            "model": POLLINATION_MODEL
+        }
+        
+        if POLLINATION_API_KEY:
+            params["key"] = POLLINATION_API_KEY
 
-        resp = session_req.get(url, headers=headers, timeout=timeout)
+        resp = session_req.get(url, params=params, timeout=timeout)
         
         if resp.status_code == 200:
             result = resp.text.strip()
@@ -543,5 +543,42 @@ def ask():
 
 
 if __name__ == "__main__":
+    # Test the AI before starting the server
+    print("\n" + "="*60)
+    print("🧪 TESTING POLLINATIONS AI CONNECTION")
+    print("="*60)
+    
+    try:
+        test_prompt = "Say 'Hello! AI is working correctly.' and nothing else."
+        print(f"\n📤 Sending test prompt: {test_prompt}")
+        result = call_llm(test_prompt, timeout=30)
+        print(f"✅ AI Response: {result}\n")
+        print("="*60)
+        print("✅ AI SERVICE IS WORKING!\n")
+    except Exception as e:
+        print(f"❌ AI Test Failed: {e}")
+        print("⚠️  Server will start anyway, but queries may fail.\n")
+        print("="*60 + "\n")
+    
+    # Test the process_query function
+    try:
+        print("\n" + "="*60)
+        print("🧪 TESTING QUERY PROCESSING")
+        print("="*60)
+        
+        test_query = "I ate pizza today"
+        print(f"\n📤 Test query: {test_query}")
+        ai_result = process_query(test_query)
+        print(f"✅ Processed result:")
+        print(json.dumps(ai_result, indent=2))
+        print("\n" + "="*60)
+        print("✅ QUERY PROCESSING IS WORKING!\n")
+    except Exception as e:
+        print(f"❌ Query Processing Test Failed: {e}\n")
+        print("="*60 + "\n")
+    
+    # Start the Flask server
     port = int(os.environ.get("PORT", 5000))
+    print(f"\n🚀 Starting Flask server on port {port}...")
+    print("="*60 + "\n")
     app.run(host="0.0.0.0", port=port, debug=True, threaded=True, use_reloader=False)
