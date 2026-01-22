@@ -116,9 +116,9 @@ def call_pollinations_llm(messages, timeout=180):
         encoded_prompt = urllib.parse.quote(prompt)
 
         # Prefer token as query param (some gateways expect this)
-        url = f"https://text.pollinations.ai/{encoded_prompt}?model={POLLINATION_MODEL}"
+        url = f"https://gen.pollinations.ai/text/{encoded_prompt}?model={POLLINATION_MODEL}"
         if POLLINATION_API_KEY:
-            url += f"&token={POLLINATION_API_KEY}"
+            url += f"&key={POLLINATION_API_KEY}"
 
         headers = {}
         resp = session_req.get(url, headers=headers, timeout=timeout)
