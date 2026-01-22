@@ -76,11 +76,10 @@ def call_llm(prompt_text, timeout=180):
         url = f"https://gen.pollinations.ai/text/{prompt_text}"
         
         params = {
-            "model": POLLINATION_MODEL
+            "model": POLLINATION_MODEL,
+            "key": POLLINATION_API_KEY
         }
         
-        if POLLINATION_API_KEY:
-            params["key"] = POLLINATION_API_KEY
 
         resp = session_req.get(url, params=params, timeout=timeout)
         
