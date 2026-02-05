@@ -21,7 +21,8 @@ AIRTABLE_TABLE_ID = os.environ.get("AIRTABLE_TABLE_ID")
 
 # Pollinations.AI config (only AI service)
 POLLINATION_API_KEY = os.environ.get("POLLINATION")
-POLLINATION_MODEL = "openai-fast"
+POLLINATION_MODEL_FAST = "openai-fast"  # For query processing and classification
+POLLINATION_MODEL_LARGE = "openai-large"  # For final answer generation
 
 UI_PASSWORD = os.environ.get("UI_PASSWORD")
 FLASK_SECRET = os.environ.get("FLASK_SECRET")
@@ -70,17 +71,30 @@ session_req.mount("https://", adapter)
 session_req.mount("http://", adapter)
 
 
-def call_llm(prompt_text, timeout=180):
-    """Single AI service using Pollinations.AI"""
+def call_llm(prompt_text, model_type="fast", timeout=180):
+    """
+    Call Pollinations.AI with specified model type.
+    
+    Args:
+        prompt_text: The prompt to send
+        model_type: "fast" for openai-fast (classification/extraction) or "large" for openai-large (final answers)
+        timeout: Request timeout in seconds
+    """
     try:
-        url = f"https://gen.pollinations.ai/text/{prompt_text}"
+        # URL encode the prompt
+        url = "https://gen.pollinations.ai/text"
+        
+        # Select model based on type
+        model = POLLINATION_MODEL_FAST if model_type == "fast" else POLLINATION_MODEL_LARGE
         
         params = {
-            "model": POLLINATION_MODEL,
-            "key": POLLINATION_API_KEY
+            "model": model,
+            "key": POLLINATION_API_KEY,
+            "prompt": prompt_text
         }
         
-
+        print(f"🤖 Using model: {model}")
+        
         resp = session_req.get(url, params=params, timeout=timeout)
         
         if resp.status_code == 200:
@@ -99,6 +113,7 @@ def call_llm(prompt_text, timeout=180):
 def process_query(query: str) -> dict:
     """
     Single AI call to handle everything: classify intent and extract/answer in one go.
+    Uses openai-fast model for quick classification and extraction.
     Returns: {"intent": "INSERT"|"QUERY", "data": {...}}
     """
     prompt = f"""Analyze this user query and respond with ONLY valid JSON (no markdown, no extra text).
@@ -122,7 +137,8 @@ Rules:
 JSON response:"""
 
     try:
-        result = call_llm(prompt)
+        # Use fast model for classification and extraction
+        result = call_llm(prompt, model_type="fast")
         # Clean up potential markdown or extra text
         result = result.strip()
         if result.startswith("```"):
@@ -169,7 +185,10 @@ def search_airtable_by_reference(keywords: list) -> list:
 
 
 def llm_answer_using_records(query: str, records: list) -> str:
-    """Generate answer using retrieved records"""
+    """
+    Generate answer using retrieved records.
+    Uses openai-large model for high-quality final answers.
+    """
     context = "\n".join([json.dumps(r.get("fields", {}), ensure_ascii=False) for r in records]) or "No records found."
     
     prompt = f"""You are Krishna's memory assistant. Answer the question using ONLY the provided records.
@@ -188,7 +207,8 @@ Available records:
 
 Your answer (in Markdown):"""
 
-    return call_llm(prompt)
+    # Use large model for final answer generation
+    return call_llm(prompt, model_type="large")
 
 
 LOGIN_HTML = """
@@ -516,7 +536,7 @@ def ask():
         return jsonify({"reply": "⚠️ Query required"}), 400
 
     try:
-        # Single AI call handles classification and extraction/keywords
+        # Single AI call handles classification and extraction/keywords (uses openai-fast)
         ai_result = process_query(query)
         
         if ai_result.get("intent") == "INSERT":
@@ -529,7 +549,7 @@ def ask():
             insert_airtable(fields)
             result = "✅ **Memory saved successfully!**\n\nYour information has been stored."
         else:
-            # Retrieve and answer
+            # Retrieve and answer (uses openai-large for final answer)
             keywords = ai_result.get("keywords", [query])
             records = search_airtable_by_reference(keywords)
             result = llm_answer_using_records(query, records)
@@ -549,11 +569,16 @@ if __name__ == "__main__":
     
     try:
         test_prompt = "Say 'Hello! AI is working correctly.' and nothing else."
-        print(f"\n📤 Sending test prompt: {test_prompt}")
-        result = call_llm(test_prompt, timeout=30)
-        print(f"✅ AI Response: {result}\n")
+        print(f"\n📤 Sending test prompt to openai-fast model: {test_prompt}")
+        result = call_llm(test_prompt, model_type="fast", timeout=30)
+        print(f"✅ AI Response (fast): {result}\n")
+        
+        print(f"📤 Sending test prompt to openai-large model: {test_prompt}")
+        result = call_llm(test_prompt, model_type="large", timeout=30)
+        print(f"✅ AI Response (large): {result}\n")
+        
         print("="*60)
-        print("✅ AI SERVICE IS WORKING!\n")
+        print("✅ BOTH AI MODELS ARE WORKING!\n")
     except Exception as e:
         print(f"❌ AI Test Failed: {e}")
         print("⚠️  Server will start anyway, but queries may fail.\n")
