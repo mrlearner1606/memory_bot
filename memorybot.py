@@ -21,8 +21,8 @@ AIRTABLE_TABLE_ID = os.environ.get("AIRTABLE_TABLE_ID")
 
 # Pollinations.AI config (only AI service)
 POLLINATION_API_KEY = os.environ.get("POLLINATION")
-POLLINATION_MODEL_FAST = "openai-fast"  # For query processing and classification
-POLLINATION_MODEL_LARGE = "openai-large"  # For final answer generation
+POLLINATION_MODEL_FAST = "perplexity-fast"  # For query processing and classification
+POLLINATION_MODEL_LARGE = "perplexity-reasoning"  # For final answer generation
 
 UI_PASSWORD = os.environ.get("UI_PASSWORD")
 FLASK_SECRET = os.environ.get("FLASK_SECRET")
